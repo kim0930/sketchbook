@@ -1,9 +1,11 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Canvas, useFrame, useThree } from '@react-three/fiber';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import { Canvas, addAfterEffect, useFrame, useThree } from '@react-three/fiber';
 import { Line, OrbitControls, TransformControls } from '@react-three/drei';
 import {
   AxesHelper,
   BufferGeometry,
+  Color,
+  DoubleSide,
   Float32BufferAttribute,
   GridHelper,
   Group,
@@ -13,9 +15,12 @@ import {
   MeshLambertMaterial,
   MOUSE,
   Object3D,
+  OrthographicCamera,
   PerspectiveCamera,
+  PlaneGeometry,
   Plane as ThreePlane,
   SphereGeometry,
+  Vector4,
   Raycaster,
   Vector2,
   Vector3,
@@ -163,7 +168,19 @@ function nearlyIdentity(matrix: number[]): boolean {
   return matrix.every((value, index) => Math.abs(value - id[index]) < 1e-5);
 }
 
+type SectionCut = { axis: 'x' | 'y' | 'z'; t: number };
+
 export function Viewport(props: ViewportProps) {
+  const planSlot = useRef<HTMLDivElement>(null);
+  const [sectionOn, setSectionOn] = useState(false);
+  const [sectionAxis, setSectionAxis] = useState<SectionCut['axis']>('z');
+  const [sectionT, setSectionT] = useState(0.68);
+  const bounds = useMemo(() => modelBounds(props.doc), [props.doc]);
+  const section = sectionOn ? { axis: sectionAxis, t: sectionT } : null;
+  const cutInches = bounds
+    ? bounds.min[sectionAxis === 'x' ? 0 : sectionAxis === 'y' ? 1 : 2] +
+      sectionT * (bounds.max[sectionAxis === 'x' ? 0 : sectionAxis === 'y' ? 1 : 2] - bounds.min[sectionAxis === 'x' ? 0 : sectionAxis === 'y' ? 1 : 2])
+    : 0;
   return (
     <div
       className="viewport"
@@ -172,21 +189,60 @@ export function Viewport(props: ViewportProps) {
       <Canvas
         camera={{ fov: 42, near: 0.05, far: 500000, position: [190, -210, 130] }}
         gl={{ antialias: true, logarithmicDepthBuffer: true }}
-        onCreated={({ camera }) => {
+        onCreated={({ camera, gl }) => {
           camera.up.set(0, 0, 1);
+          camera.layers.enable(1);
+          gl.localClippingEnabled = true;
         }}
       >
         <color attach="background" args={['#d7e3ee']} />
         <hemisphereLight args={['#f5f9fc', '#eadfce', 0.78]} position={[0, 0, 200]} />
         <directionalLight position={[220, -280, 360]} intensity={1.2} />
         <ambientLight intensity={0.22} />
-        <EditorScene {...props} />
+        <EditorScene {...props} planSlot={planSlot} section={section} />
       </Canvas>
+      <div className="plan-card">
+        <div className="plan-view" ref={planSlot} />
+        <div className="plan-tools">
+          <header>
+            <b>평면도</b>
+            <button
+              type="button"
+              className={sectionOn ? 'on' : ''}
+              title="이 높이보다 위쪽을 숨겨 안쪽을 봅니다"
+              onClick={() => setSectionOn((value) => !value)}
+            >
+              단면
+            </button>
+          </header>
+          {sectionOn && (
+            <>
+              <select aria-label="단면 방향" value={sectionAxis} onChange={(event) => setSectionAxis(event.target.value as SectionCut['axis'])}>
+                <option value="z">수평 · 지붕 자르기</option>
+                <option value="y">정면 자르기</option>
+                <option value="x">측면 자르기</option>
+              </select>
+              <label>
+                자르는 위치 {bounds ? formatLength(cutInches, props.unit) : ''}
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.005}
+                  value={sectionT}
+                  aria-label="단면 위치"
+                  onChange={(event) => setSectionT(Number(event.target.value))}
+                />
+              </label>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-function EditorScene(props: ViewportProps) {
+function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement | null>; section: SectionCut | null }) {
   const { camera, gl, scene } = useThree();
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -195,6 +251,7 @@ function EditorScene(props: ViewportProps) {
   const [hover, setHover] = useState<PickData | null>(null);
   const previewRef = useRef<SketchDocument | null>(null);
   previewRef.current = preview;
+  const boundsCache = useRef<{ doc: SketchDocument; bounds: ReturnType<typeof modelBounds> } | null>(null);
   const drawRef = useRef<Draw | null>(null);
   const modelRef = useRef<Group>(null);
   const controlsRef = useRef<OrbitControlsImpl>(null);
@@ -214,9 +271,25 @@ function EditorScene(props: ViewportProps) {
     markerAxes.traverse((obj) => {
       obj.raycast = () => {};
       obj.renderOrder = 20;
+      obj.layers.set(1);
     });
     group.add(markerAxes);
+    marker.layers.set(1);
+    markerAxes.layers.set(1);
+    group.layers.set(1);
     return group;
+  }, []);
+  const clipPlane = useMemo(() => new ThreePlane(new Vector3(0, 0, -1), 0), []);
+  const sectionSheet = useMemo(() => {
+    const mesh = new Mesh(
+      new PlaneGeometry(1, 1),
+      new MeshBasicMaterial({ color: 0xd4533c, transparent: true, opacity: 0.16, side: DoubleSide, depthWrite: false }),
+    );
+    mesh.raycast = () => {};
+    mesh.layers.set(1);
+    mesh.renderOrder = 3;
+    mesh.visible = false;
+    return mesh;
   }, []);
   const gizmoDrag = useRef<{ start: Matrix4; ghost: Group; hidden: Object3D[] } | null>(null);
   const measureRef = useRef('');
@@ -250,6 +323,119 @@ function EditorScene(props: ViewportProps) {
       }),
     [],
   );
+
+  useLayoutEffect(() => {
+    const bounds = modelBounds(props.doc);
+    if (!props.section || !bounds) {
+      gl.clippingPlanes = [];
+      sectionSheet.visible = false;
+      return;
+    }
+    const axis = props.section.axis === 'x' ? 0 : props.section.axis === 'y' ? 1 : 2;
+    const min = bounds.min[axis];
+    const max = bounds.max[axis];
+    const cut = min + props.section.t * (max - min);
+    clipPlane.normal.set(0, 0, 0).setComponent(axis, -1);
+    clipPlane.constant = cut;
+    gl.clippingPlanes = [clipPlane];
+    const center = new Vector3(...bounds.center);
+    const size = new Vector3(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]);
+    const span = (value: number) => Math.max(value, 1) * 1.08;
+    if (axis === 2) {
+      sectionSheet.rotation.set(0, 0, 0);
+      sectionSheet.scale.set(span(size.x), span(size.y), 1);
+      sectionSheet.position.set(center.x, center.y, cut);
+    } else if (axis === 0) {
+      sectionSheet.rotation.set(0, Math.PI / 2, 0);
+      sectionSheet.scale.set(span(size.z), span(size.y), 1);
+      sectionSheet.position.set(cut, center.y, center.z);
+    } else {
+      sectionSheet.rotation.set(-Math.PI / 2, 0, 0);
+      sectionSheet.scale.set(span(size.x), span(size.z), 1);
+      sectionSheet.position.set(center.x, cut, center.z);
+    }
+    sectionSheet.visible = true;
+  }, [props.section, props.doc, gl, clipPlane, sectionSheet]);
+
+  useEffect(() => {
+    const planCam = new OrthographicCamera(-1, 1, 1, -1, 0.1, 100000);
+    planCam.layers.set(0);
+    const clear = new Color();
+    const viewport = new Vector4();
+    const scissor = new Vector4();
+    const remove = addAfterEffect(() => {
+      const slot = props.planSlot.current;
+      const canvas = gl.domElement;
+      if (!slot) return;
+      const canvasRect = canvas.getBoundingClientRect();
+      const slotRect = slot.getBoundingClientRect();
+      const ratio = gl.getPixelRatio();
+      const x = Math.round((slotRect.left - canvasRect.left) * ratio);
+      const y = Math.round((canvasRect.bottom - slotRect.bottom) * ratio);
+      const width = Math.round(slotRect.width * ratio);
+      const height = Math.round(slotRect.height * ratio);
+      if (width < 8 || height < 8) return;
+      const doc = previewRef.current ?? propsRef.current.doc;
+      if (boundsCache.current?.doc !== doc) boundsCache.current = { doc, bounds: modelBounds(doc) };
+      const bounds = boundsCache.current.bounds;
+      const center = bounds
+        ? new Vector3(...bounds.center)
+        : new Vector3(40, 30, 16);
+      const size = bounds
+        ? new Vector3(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2])
+        : new Vector3(80, 60, 32);
+      const half = Math.max(size.x, size.y, 8) * 0.62;
+      planCam.left = -half;
+      planCam.right = half;
+      planCam.top = half;
+      planCam.bottom = -half;
+      planCam.up.set(0, 1, 0);
+      planCam.position.set(center.x, center.y, center.z + Math.max(size.z, 1) + 80);
+      planCam.lookAt(center.x, center.y, center.z);
+      planCam.near = 0.1;
+      planCam.far = Math.max(size.z, 1) * 6 + 500;
+      planCam.updateProjectionMatrix();
+      gl.getViewport(viewport);
+      gl.getScissor(scissor);
+      const scissorTest = gl.getScissorTest();
+      gl.getClearColor(clear);
+      const alpha = gl.getClearAlpha();
+      gl.setScissorTest(true);
+      gl.setViewport(x, y, width, height);
+      gl.setScissor(x, y, width, height);
+      gl.setClearColor('#e7eef5', 1);
+      gl.clear(true, true, false);
+      gl.render(scene, planCam);
+      gl.setViewport(viewport);
+      gl.setScissor(scissor);
+      gl.setScissorTest(scissorTest);
+      gl.setClearColor(clear, alpha);
+    });
+    return () => remove();
+  }, [gl, scene, props.planSlot]);
+
+  useEffect(() => {
+    const el = gl.domElement;
+    const onWheel = (event: WheelEvent) => {
+      const controls = controlsRef.current;
+      if (!controls) return;
+      event.preventDefault();
+      const cam = camera as PerspectiveCamera;
+      const pixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 400 : event.deltaY;
+      const factor = Math.pow(1.48, pixels / 100);
+      const offset = cam.position.clone().sub(controls.target);
+      const distance = Math.min(Math.max(offset.length() * factor, 0.3), 1e8);
+      if (offset.lengthSq() < 1e-8) offset.set(1, -1, 0.7);
+      offset.setLength(distance);
+      cam.position.copy(controls.target).add(offset);
+      cam.near = Math.max(distance / 5000, 0.01);
+      cam.far = distance * 50;
+      cam.updateProjectionMatrix();
+      controls.update();
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [camera, gl]);
 
   useEffect(() => {
     setPreview(null);
@@ -1012,6 +1198,7 @@ function EditorScene(props: ViewportProps) {
       <primitive object={gridRef.current} />
       <primitive object={axesRef.current} />
       <primitive object={orbitHandle} />
+      <primitive object={sectionSheet} />
       <primitive ref={modelRef} object={built.group} />
       <primitive object={pivot} />
       {rubber && rubber.length >= 2 && <Line points={rubber} color="#d4533c" lineWidth={2} />}
@@ -1019,6 +1206,7 @@ function EditorScene(props: ViewportProps) {
         ref={controlsRef}
         makeDefault
         enableDamping={false}
+        enableZoom={false}
         screenSpacePanning
         mouseButtons={{ LEFT: -1 as MOUSE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE }}
       />

@@ -108,12 +108,51 @@ button:disabled { opacity: 0.35; cursor: default; }
 .stage { flex: 1; min-width: 0; position: relative; }
 .viewport { position: absolute; inset: 0; }
 .viewport canvas { display: block; }
+.plan-card {
+  position: absolute;
+  z-index: 3;
+  top: 10px;
+  left: 10px;
+  width: 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.plan-view {
+  height: 148px;
+  border: 1px solid #d5cbbd;
+  border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(28, 35, 40, 0.16);
+  background: rgba(231, 238, 245, 0.2);
+}
+.plan-tools {
+  pointer-events: auto;
+  background: rgba(255, 250, 244, 0.96);
+  border: 1px solid #e4d8c6;
+  border-radius: 8px;
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.plan-tools header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.plan-tools header b { font-size: 12px; font-weight: 650; }
+.plan-tools header button, .plan-tools select {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 7px;
+}
+.plan-tools header button.on { background: var(--ink); color: white; border-color: var(--ink); }
+.plan-tools label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
+.plan-tools input[type='range'] { width: 100%; accent-color: var(--accent); }
 
 .banner {
   position: absolute;
   z-index: 2;
   top: 10px;
-  left: 10px;
+  left: 210px;
   display: flex;
   gap: 6px;
   align-items: center;
