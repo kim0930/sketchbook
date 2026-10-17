@@ -87,6 +87,7 @@ export interface ViewportProps {
   onCommit: (doc: SketchDocument) => void;
   onLiveMeasure: (text: string) => void;
   onEscape: () => void;
+  placeAnchorRef: RefObject<Vec3 | null>;
 }
 
 type Draw =
@@ -369,11 +370,10 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       if (!slot) return;
       const canvasRect = canvas.getBoundingClientRect();
       const slotRect = slot.getBoundingClientRect();
-      const ratio = gl.getPixelRatio();
-      const x = Math.round((slotRect.left - canvasRect.left) * ratio);
-      const y = Math.round((canvasRect.bottom - slotRect.bottom) * ratio);
-      const width = Math.round(slotRect.width * ratio);
-      const height = Math.round(slotRect.height * ratio);
+      const x = Math.round(slotRect.left - canvasRect.left);
+      const y = Math.round(canvasRect.bottom - slotRect.bottom);
+      const width = Math.round(slotRect.width);
+      const height = Math.round(slotRect.height);
       if (width < 8 || height < 8) return;
       const doc = previewRef.current ?? propsRef.current.doc;
       if (boundsCache.current?.doc !== doc) boundsCache.current = { doc, bounds: modelBounds(doc) };
@@ -746,6 +746,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       if (grabOrbit(event)) return;
       const current = propsRef.current;
       const tool = current.tool;
+      if (tool === 'navigate') return;
       if (tool === 'rect' || tool === 'circle' || tool === 'line') {
         const picked = choosePlane(event);
         if (!picked) return;
@@ -890,6 +891,11 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
         return;
       }
       const current = propsRef.current;
+      if (current.tool === 'navigate') {
+        el.style.cursor = 'grab';
+        setHover((prev) => (prev ? null : prev));
+        return;
+      }
       const draw = drawRef.current;
       if (draw?.kind === 'push') {
         const ray = cast(event);
@@ -944,9 +950,10 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     };
 
     const onUp = (event: PointerEvent) => {
+      if (propsRef.current.tool === 'navigate') el.style.cursor = 'grab';
       if (orbitDrag.current) {
         orbitDrag.current = null;
-        el.style.cursor = '';
+        el.style.cursor = propsRef.current.tool === 'navigate' ? 'grab' : '';
         return;
       }
       const draw = drawRef.current;
@@ -984,6 +991,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
 
     const down = (event: PointerEvent) => {
       if (event.button !== 0) return;
+      if (propsRef.current.tool === 'navigate') el.style.cursor = 'grabbing';
       queueMicrotask(() => {
         const gizmo = gizmoRef.current as unknown as { dragging?: boolean; axis?: string | null } | null;
         if (gizmo?.dragging || gizmo?.axis) return;
@@ -1001,6 +1009,12 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       window.removeEventListener('keydown', onKey);
     };
   }, [camera, gl]);
+
+  useEffect(() => {
+    const el = gl.domElement;
+    el.style.cursor = props.tool === 'navigate' ? 'grab' : '';
+    if (props.tool === 'navigate') setHover(null);
+  }, [props.tool, gl]);
 
   const applyNumeric = (text: string) => {
     const current = propsRef.current;
@@ -1189,6 +1203,11 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     const controls = controlsRef.current;
     if (!controls) return;
     orbitHandle.position.copy(controls.target);
+    const anchor = props.placeAnchorRef;
+    if (!anchor.current) anchor.current = [0, 0, 0];
+    anchor.current[0] = controls.target.x;
+    anchor.current[1] = controls.target.y;
+    anchor.current[2] = controls.target.z;
     const distance = camera.position.distanceTo(controls.target);
     orbitHandle.scale.setScalar(Math.max(distance * 0.05, 0.4));
   });
@@ -1208,7 +1227,11 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
         enableDamping={false}
         enableZoom={false}
         screenSpacePanning
-        mouseButtons={{ LEFT: -1 as MOUSE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE }}
+        mouseButtons={
+          props.tool === 'navigate'
+            ? { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.PAN }
+            : { LEFT: -1 as MOUSE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE }
+        }
       />
       {showGizmo && (
         <TransformControls

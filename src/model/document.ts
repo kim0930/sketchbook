@@ -7,6 +7,7 @@ import {
   invertMat,
   length,
   multiplyMat,
+  translation,
   newell,
   normalize,
   planeBasis,
@@ -14,7 +15,7 @@ import {
   scale,
   transformPoint,
 } from './math.ts';
-import type { Definition, Face, Plane, SketchDocument, Vec3 } from './types.ts';
+import type { Definition, Face, Plane, RGBA, SketchDocument, Vec3 } from './types.ts';
 
 export function cloneDoc(doc: SketchDocument): SketchDocument {
   return {
@@ -481,6 +482,74 @@ export function makeUnique(doc: SketchDocument, placementId: string): SketchDocu
     draft.definitions.push(copy);
     loc.parent.placements[loc.index].definitionId = copy.id;
   });
+}
+
+export function addImportedMesh(
+  doc: SketchDocument,
+  name: string,
+  vertices: Vec3[],
+  triangles: { indices: [number, number, number]; color: RGBA }[],
+  origin: Vec3,
+): { doc: SketchDocument; placementId: string } | null {
+  if (vertices.length < 3 || triangles.length === 0) return null;
+  const faces = triangles.filter((tri) => {
+    const [a, b, c] = tri.indices;
+    return a !== b && b !== c && a !== c && a < vertices.length && b < vertices.length && c < vertices.length;
+  });
+  if (!faces.length) return null;
+  let placementId = '';
+  const next = withDoc(doc, (draft) => {
+    let layer = draft.layers.find((item) => item.name === '라이브러리');
+    if (!layer) {
+      layer = { id: uid('layer'), name: '라이브러리', color: [90, 130, 150], visible: true };
+      draft.layers.push(layer);
+    }
+    const materialIds = new Map<string, string>();
+    const materialFor = (color: RGBA) => {
+      const key = color.join(',');
+      const cached = materialIds.get(key);
+      if (cached) return cached;
+      const found = draft.materials.find(
+        (item) => item.color[0] === color[0] && item.color[1] === color[1] && item.color[2] === color[2] && Math.round(item.opacity * 255) === color[3],
+      );
+      if (found) {
+        materialIds.set(key, found.id);
+        return found.id;
+      }
+      const id = uid('mat');
+      draft.materials.push({ id, name, color: [...color], opacity: color[3] / 255 });
+      materialIds.set(key, id);
+      return id;
+    };
+    const def: Definition = {
+      id: uid('def'),
+      name,
+      kind: 'definition',
+      vertices: vertices.map((vertex) => [vertex[0], vertex[1], vertex[2]]),
+      faces: faces.map((tri) => ({
+        id: uid('face'),
+        outer: [...tri.indices],
+        holes: [],
+        materialId: materialFor(tri.color),
+        layerId: layer.id,
+        hidden: false,
+      })),
+      edges: [],
+      placements: [],
+    };
+    draft.definitions.push(def);
+    placementId = uid('inst');
+    getRoot(draft).placements.push({
+      id: placementId,
+      name,
+      definitionId: def.id,
+      matrix: translation(origin[0], origin[1], origin[2]),
+      materialId: null,
+      layerId: layer.id,
+      hidden: false,
+    });
+  });
+  return placementId ? { doc: next, placementId } : null;
 }
 
 export function duplicatePlacement(doc: SketchDocument, definitionId: string): SketchDocument {

@@ -21,17 +21,21 @@ import {
   updateMaterial,
   usageCount,
   duplicatePlacement,
+  modelBounds,
 } from './model/document.ts';
 import { exportSkp } from './model/exportSkp.ts';
 import { toGlb, toObj, toStl } from './model/exportMesh.ts';
 import { importModel } from './model/importSkp.ts';
+import { importLibraryModel } from './model/importGltf.ts';
 import type { ParseMessage } from './parseWorker.ts';
 import { formatArea, formatLength, UNIT_LABEL } from './model/math.ts';
 import { createEmpty, createStarter } from './model/starter.ts';
-import type { Selection, SketchDocument, Tool, Unit } from './model/types.ts';
+import type { Selection, SketchDocument, Tool, Unit, Vec3 } from './model/types.ts';
+import type { LibraryEntry } from './library/catalog.ts';
 import {
   IconCircle,
   IconErase,
+  IconHand,
   IconLine,
   IconMove,
   IconPaint,
@@ -43,9 +47,11 @@ import {
   IconSelect,
   IconUndo,
 } from './ui/icons.tsx';
+import { LibraryPanel } from './ui/LibraryPanel.tsx';
 import { Viewport } from './viewport/Viewport.tsx';
 
 const TOOLS: { id: Tool; label: string; key: string; hint: string; icon: ReactNode }[] = [
+  { id: 'navigate', label: '탐색', key: 'H', hint: '왼쪽 드래그로 둘러보고, 오른쪽 드래그로 이동합니다. 모델은 선택되지 않습니다.', icon: <IconHand /> },
   { id: 'select', label: '선택', key: 'V', hint: '클릭으로 선택, 더블클릭으로 그룹 안으로 들어갑니다.', icon: <IconSelect /> },
   { id: 'line', label: '선', key: 'L', hint: '점을 이어서 클릭하고, 시작점에 맞추거나 Enter로 면을 닫습니다.', icon: <IconLine /> },
   { id: 'rect', label: '사각형', key: 'R', hint: '첫 모서리와 반대 모서리를 찍습니다. 치수는 80, 60 처럼 입력합니다.', icon: <IconRect /> },
@@ -139,11 +145,16 @@ export default function App() {
   const [toasts, setToasts] = useState<string[]>([]);
   const [help, setHelp] = useState(true);
   const [menu, setMenu] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryBusy, setLibraryBusy] = useState<string | null>(null);
   const [viewToken, setViewToken] = useState(1);
   const [viewCommand, setViewCommand] = useState<ViewportCommand>(null);
   const [numericRequest, setNumericRequest] = useState<{ id: number; text: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const docRef = useRef(doc);
+  const placeAnchorRef = useRef<Vec3 | null>(null);
+  const dropSlot = useRef(0);
+  const libraryLock = useRef(false);
   docRef.current = doc;
 
   const path = useMemo(() => validPath(doc, editingPath), [doc, editingPath]);
@@ -175,6 +186,37 @@ export default function App() {
     setViewToken((value) => value + 1);
     setTyped('');
     setLive('');
+    dropSlot.current = 0;
+  };
+
+  const importEntry = async (entry: LibraryEntry) => {
+    if (libraryLock.current) return;
+    libraryLock.current = true;
+    setLibraryBusy(entry.id);
+    try {
+      const anchor = placeAnchorRef.current;
+      const bounds = modelBounds(docRef.current);
+      const slot = dropSlot.current;
+      dropSlot.current += 1;
+      const origin: Vec3 = [
+        (anchor?.[0] ?? bounds?.center[0] ?? 0) + (slot % 4) * 56,
+        (anchor?.[1] ?? bounds?.center[1] ?? 0) + (Math.floor(slot / 4) % 3) * 56,
+        bounds?.min[2] ?? 0,
+      ];
+      const placed = await importLibraryModel(docRef.current, entry, origin);
+      if (!placed) {
+        toast('이 모델에서 가져올 면이 없습니다');
+        return;
+      }
+      commit(placed.doc);
+      setSelection({ kind: 'placement', placementId: placed.placementId, path: [placed.placementId] });
+      toast(`가져왔습니다: ${entry.name}. ${entry.credit}`);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '가져오기에 실패했습니다');
+    } finally {
+      libraryLock.current = false;
+      setLibraryBusy(null);
+    }
   };
 
   const commit = (next: SketchDocument) => {
@@ -418,6 +460,9 @@ export default function App() {
           <button type="button" onClick={() => replaceDoc(createStarter())}>
             예제
           </button>
+          <button type="button" className={libraryOpen ? 'on' : ''} onClick={() => setLibraryOpen((open) => !open)}>
+            라이브러리
+          </button>
           <button type="button" className="icon-btn" disabled={!past.length} onClick={undo} title="실행 취소 (Ctrl+Z)">
             <IconUndo />
           </button>
@@ -453,6 +498,7 @@ export default function App() {
             </button>
           ))}
         </nav>
+        {libraryOpen && <LibraryPanel busyId={libraryBusy} onImport={(entry) => void importEntry(entry)} onClose={() => setLibraryOpen(false)} />}
 
         <div className="stage">
           {path.length > 0 && (
@@ -499,6 +545,7 @@ export default function App() {
             onEditingPath={setEditingPath}
             onCommit={commit}
             onLiveMeasure={setLive}
+            placeAnchorRef={placeAnchorRef}
             onEscape={() => {
               if (path.length) setEditingPath(path.slice(0, -1));
               else setSelection(null);
@@ -507,8 +554,7 @@ export default function App() {
           {help && (
             <div className="help">
               <p>
-                우클릭 드래그로 둘러보고, 휠로 확대, 가운데 버튼으로 이동합니다. 사각형으로 면을 그린 뒤 밀기/끌기로 두께를 주세요.
-                .skp 파일을 끌어다 놓아도 열립니다.
+                탐색(H)은 선택 없이 둘러봅니다. 우클릭 드래그로 회전, 휠로 확대, 가운데 버튼으로 이동합니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
               </p>
               <button type="button" onClick={() => setHelp(false)}>
                 닫기

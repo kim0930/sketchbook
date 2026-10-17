@@ -64,6 +64,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   padding: 6px 10px;
 }
 .topbar button.primary { background: var(--accent); border-color: #b8432e; }
+.topbar button.on { background: #f4f1ea; color: var(--ink); border-color: #f4f1ea; }
 .topbar button.icon-btn, .tools button { padding: 0; width: 32px; height: 32px; display: grid; place-items: center; }
 .menu { position: relative; }
 .menu-pop {
@@ -85,6 +86,65 @@ button:disabled { opacity: 0.35; cursor: default; }
 .menu-pop button:hover { background: #efe8db; }
 
 .workspace { flex: 1; min-height: 0; display: flex; }
+.library {
+  width: 300px;
+  background: var(--paper);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.library-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px 0; }
+.library-head button, .library-cats button, .library-card {
+  background: white;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+.library-head button, .library-cats button { border-radius: 6px; padding: 4px 8px; }
+.library-card:hover { background: #efe4d4; }
+.library-cats button.on { background: var(--ink); color: white; border-color: var(--ink); }
+.library-search {
+  margin: 8px 12px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.library-cats { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 12px 8px; }
+.library-note { margin: 0 12px 8px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.library-grid {
+  overflow: auto;
+  padding: 0 12px 12px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  align-content: start;
+}
+.library-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 8px;
+  padding: 0;
+  overflow: hidden;
+  text-align: left;
+}
+.library-card img, .library-card .ph {
+  width: 100%;
+  height: 88px;
+  min-height: 88px;
+  flex: 0 0 88px;
+  object-fit: cover;
+  background: #e7eef3;
+  display: block;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 88px;
+  text-align: center;
+}
+.library-card span { padding: 0 6px 6px; font-size: 11px; line-height: 1.3; }
+.library-card.busy { opacity: 0.55; }
+.library-empty { grid-column: 1 / -1; margin: 0; color: var(--muted); line-height: 1.45; }
 .tools {
   width: 52px;
   background: #1b2429;

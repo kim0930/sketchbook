@@ -5,6 +5,7 @@ export type RGB = [number, number, number];
 export type Unit = 'mm' | 'cm' | 'm' | 'in' | 'ft';
 
 export type Tool =
+  | 'navigate'
   | 'select'
   | 'line'
   | 'rect'
