@@ -328,6 +328,14 @@ button:disabled { opacity: 0.35; cursor: default; }
 .tool-hint { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #3d4a51; }
 .tool-hint b { color: var(--accent); font-weight: 650; }
 .measure { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.readout {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1d4e89;
+  font-variant-numeric: tabular-nums;
+}
 .measure input, .status select {
   background: white;
   border: 1px solid var(--line);

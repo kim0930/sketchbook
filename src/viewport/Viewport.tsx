@@ -34,6 +34,7 @@ import {
   deleteFace,
   deletePlacement,
   editingDefinition,
+  faceArea,
   faceCentroid,
   getDef,
   groundPlane,
@@ -52,19 +53,23 @@ import {
 import { boundsOfPoints, definitionLocalPoints, findPlacement } from '../model/document.ts';
 import {
   add,
+  centroid,
   closestLineParam,
   dot,
   faceNormal,
+  formatArea,
   formatLength,
   identity,
   invertMat,
   length,
+  multiplyMat,
   normalize,
   parseMeasures,
   planeFromPoints,
   rayPlane,
   scale,
   sub,
+  transformDir,
   transformPoint,
 } from '../model/math.ts';
 import type { Plane, Selection, SketchDocument, Tool, Unit, Vec3 } from '../model/types.ts';
@@ -93,7 +98,18 @@ export interface ViewportProps {
 type Draw =
   | { kind: 'rect' | 'circle'; origin: Vec3; plane: Plane; x: number; y: number; moved: boolean }
   | { kind: 'line'; points: Vec3[]; plane: Plane }
-  | { kind: 'push'; faceId: string; definitionId: string; path: string[]; anchor: Vec3; normal: Vec3; scale: number; start: number };
+  | { kind: 'push'; faceId: string; definitionId: string; path: string[]; anchor: Vec3; normal: Vec3; scale: number; start: number }
+  | { kind: 'measure'; origin: Vec3 };
+
+const SNAP_LABEL = { endpoint: '끝점', midpoint: '중간점', center: '중심', edge: '선 위' } as const;
+const SNAP_COLOR = { endpoint: 0x2e9d4a, midpoint: 0x1e88e5, center: 0x8e24aa, edge: 0xfb8c00 } as const;
+const SNAP_RADIUS2 = { endpoint: 16 * 16, midpoint: 14 * 14, center: 12 * 12, edge: 9 * 9 } as const;
+const SNAP_RANK = { endpoint: 0, midpoint: 1, center: 2, edge: 3 } as const;
+type SnapKind = keyof typeof SNAP_LABEL;
+
+function formatDelta(delta: Vec3, unit: Unit): string {
+  return `Δx ${formatLength(delta[0], unit)} · Δy ${formatLength(delta[1], unit)} · Δz ${formatLength(delta[2], unit)}`;
+}
 
 interface PickData {
   pick?: boolean;
@@ -249,6 +265,8 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
   propsRef.current = props;
   const [preview, setPreview] = useState<SketchDocument | null>(null);
   const [rubber, setRubber] = useState<Vec3[] | null>(null);
+  const [measureLock, setMeasureLock] = useState<{ a: Vec3; b: Vec3 } | null>(null);
+  const measureLockRef = useRef<{ a: Vec3; b: Vec3 } | null>(null);
   const [hover, setHover] = useState<PickData | null>(null);
   const previewRef = useRef<SketchDocument | null>(null);
   previewRef.current = preview;
@@ -279,6 +297,17 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     markerAxes.layers.set(1);
     group.layers.set(1);
     return group;
+  }, []);
+  const snapMarker = useMemo(() => {
+    const marker = new Mesh(
+      new SphereGeometry(0.16, 16, 12),
+      new MeshBasicMaterial({ color: SNAP_COLOR.endpoint, depthTest: false, transparent: true, opacity: 1 }),
+    );
+    marker.raycast = () => {};
+    marker.layers.set(1);
+    marker.renderOrder = 30;
+    marker.visible = false;
+    return marker;
   }, []);
   const clipPlane = useMemo(() => new ThreePlane(new Vector3(0, 0, -1), 0), []);
   const sectionSheet = useMemo(() => {
@@ -658,26 +687,162 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       return path.length === editing.length ? 'face' : 'group';
     };
 
-    const snapPoint = (point: Vec3, plane: Plane, event: PointerEvent, world: number[]) => {
-      const def = editingDefinition(propsRef.current.doc, propsRef.current.editingPath);
-      let best: Vec3 | null = null;
-      let bestD = 15 * 15;
+    let snapNote = '';
+    const project = new Vector3();
+    const mat4 = new Matrix4();
+    const tmp = new Vector3();
+    const scanCache = { doc: null as SketchDocument | null, path: '', enabled: false };
+
+    const showSnap = (hit: { kind: SnapKind; world: Vec3 } | null) => {
+      if (!hit) {
+        snapMarker.visible = false;
+        snapNote = '';
+        return;
+      }
+      snapNote = SNAP_LABEL[hit.kind];
+      snapMarker.visible = true;
+      snapMarker.position.set(hit.world[0], hit.world[1], hit.world[2]);
+      (snapMarker.material as MeshBasicMaterial).color.setHex(SNAP_COLOR[hit.kind]);
+    };
+
+    const infer = (event: PointerEvent): { kind: SnapKind; world: Vec3; edgeLength?: number } | null => {
+      const current = propsRef.current;
       const rect = el.getBoundingClientRect();
-      const vertices = def.vertices.length > 8000 ? [] : def.vertices;
-      for (const vertex of vertices) {
-        const worldPoint = transformPoint(world, vertex);
-        const projected = new Vector3(...worldPoint).project(camera);
-        const sx = (projected.x * 0.5 + 0.5) * rect.width + rect.left;
-        const sy = (-projected.y * 0.5 + 0.5) * rect.height + rect.top;
-        const dx = sx - event.clientX;
-        const dy = sy - event.clientY;
-        const dist = dx * dx + dy * dy;
-        if (dist < bestD) {
-          bestD = dist;
-          best = vertex;
+      const ray = cast(event);
+      let best: { kind: SnapKind; world: Vec3; edgeLength?: number } | null = null;
+      let bestScore = Infinity;
+      const screen2 = (worldPoint: Vec3): number | null => {
+        project.set(worldPoint[0], worldPoint[1], worldPoint[2]).project(camera);
+        if (project.z < -1 || project.z > 1) return null;
+        const sx = (project.x * 0.5 + 0.5) * rect.width + rect.left;
+        const sy = (-project.y * 0.5 + 0.5) * rect.height + rect.top;
+        return (sx - event.clientX) ** 2 + (sy - event.clientY) ** 2;
+      };
+      const consider = (kind: SnapKind, worldPoint: Vec3, edgeLength?: number) => {
+        const dist = screen2(worldPoint);
+        if (dist === null || dist > SNAP_RADIUS2[kind]) return;
+        const score = SNAP_RANK[kind] * 1_000_000 + dist;
+        if (score < bestScore) {
+          bestScore = score;
+          best = { kind, world: worldPoint, edgeLength };
+        }
+      };
+      const toWorld = (matrix: number[], points: Vec3[]): Vec3[] => {
+        mat4.fromArray(matrix);
+        return points.map((p) => {
+          tmp.set(p[0], p[1], p[2]).applyMatrix4(mat4);
+          return [tmp.x, tmp.y, tmp.z];
+        });
+      };
+      const considerLoop = (local: Vec3[], matrix: number[]) => {
+        if (local.length < 2) return;
+        const limited = local.length > 64 ? local.slice(0, 64) : local;
+        const worldPts = toWorld(matrix, limited);
+        for (const point of worldPts) consider('endpoint', point);
+        if (local.length <= 64) {
+          for (let i = 0; i < worldPts.length; i++) {
+            const a = worldPts[i];
+            const b = worldPts[(i + 1) % worldPts.length];
+            const span = sub(b, a);
+            const spanLen = length(span);
+            if (spanLen < 0.05) continue;
+            consider('midpoint', [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]);
+            const t = closestLineParam(a, span, ray.origin, ray.dir);
+            if (t === null || t <= 0.04 || t >= 0.96) continue;
+            consider('edge', add(a, scale(span, t)), spanLen);
+          }
+        }
+        if (local.length >= 3 && local.length <= 16) consider('center', centroid(worldPts));
+      };
+      const picked = pick(event);
+      if (picked?.data.faceId && picked.data.definitionId) {
+        const def = getDef(current.doc, picked.data.definitionId);
+        const face = def?.faces.find((item) => item.id === picked.data.faceId);
+        if (def && face && !face.hidden) {
+          const matrix = worldMatrixOfPath(current.doc, picked.data.path ?? []);
+          considerLoop(pointsOf(def, face.outer), matrix);
+          for (const hole of face.holes) {
+            if (hole.length >= 3 && hole.length <= 64) considerLoop(pointsOf(def, hole), matrix);
+          }
         }
       }
-      if (best) return best;
+      const pathKey = current.editingPath.join('/');
+      if (scanCache.doc !== current.doc || scanCache.path !== pathKey) {
+        const root = editingDefinition(current.doc, current.editingPath);
+        let faces = 0;
+        let verts = 0;
+        const count = (def: ReturnType<typeof editingDefinition>, depth: number) => {
+          faces += def.faces.length;
+          verts += def.vertices.length;
+          if (faces > 800 || verts > 2500 || depth > 6) return;
+          for (const placement of def.placements) {
+            if (faces > 800 || verts > 2500) return;
+            const child = getDef(current.doc, placement.definitionId);
+            if (child) count(child, depth + 1);
+          }
+        };
+        count(root, 0);
+        scanCache.doc = current.doc;
+        scanCache.path = pathKey;
+        scanCache.enabled = faces <= 800 && verts <= 2500;
+      }
+      if (scanCache.enabled) {
+        const hidden = new Set(current.doc.layers.filter((layer) => !layer.visible).map((layer) => layer.id));
+        let left = 800;
+        const visit = (def: ReturnType<typeof editingDefinition>, matrix: number[], depth: number) => {
+          if (depth > 8 || left <= 0) return;
+          for (const face of def.faces) {
+            if (left <= 0) return;
+            if (face.hidden || hidden.has(face.layerId) || face.outer.length < 2 || face.outer.length > 64) continue;
+            left -= 1;
+            considerLoop(pointsOf(def, face.outer), matrix);
+          }
+          for (const placement of def.placements) {
+            if (left <= 0) return;
+            if (placement.hidden || hidden.has(placement.layerId)) continue;
+            const child = getDef(current.doc, placement.definitionId);
+            if (!child) continue;
+            visit(child, multiplyMat(matrix, placement.matrix), depth + 1);
+          }
+        };
+        visit(editingDefinition(current.doc, current.editingPath), worldMatrixOfPath(current.doc, current.editingPath), 0);
+      }
+      return best;
+    };
+
+    const pointOnPointer = (event: PointerEvent): Vec3 | null => {
+      const ray = cast(event);
+      const picked = pick(event);
+      if (picked?.data.faceId && picked.data.definitionId) {
+        const def = getDef(propsRef.current.doc, picked.data.definitionId);
+        const face = def?.faces.find((item) => item.id === picked.data.faceId);
+        const plane = face && def ? planeFromPoints(pointsOf(def, face.outer)) : null;
+        if (plane) {
+          const matrix = worldMatrixOfPath(propsRef.current.doc, picked.data.path ?? []);
+          const hit = rayPlane(ray.origin, ray.dir, transformPoint(matrix, plane.origin), transformDir(matrix, plane.normal));
+          if (hit) return hit;
+        }
+      }
+      return rayPlane(ray.origin, ray.dir, [0, 0, 0], [0, 0, 1]);
+    };
+
+    const areaText = (event: PointerEvent): string | null => {
+      const picked = pick(event);
+      if (!picked?.data.faceId || !picked.data.definitionId) return null;
+      const def = getDef(propsRef.current.doc, picked.data.definitionId);
+      const face = def?.faces.find((item) => item.id === picked.data.faceId);
+      if (!def || !face) return null;
+      return formatArea(faceArea(def, face), propsRef.current.unit);
+    };
+
+    const snapPoint = (point: Vec3, plane: Plane, event: PointerEvent, world: number[]) => {
+      const hit = infer(event);
+      showSnap(hit);
+      if (hit) {
+        const local = transformPoint(invertMat(world), hit.world);
+        const off = sub(local, plane.origin);
+        return sub(local, scale(plane.normal, dot(off, plane.normal)));
+      }
       const step = propsRef.current.snapInches;
       if (step <= 0) return point;
       const delta = sub(point, plane.origin);
@@ -685,6 +850,8 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       const v = Math.round(dot(delta, plane.v) / step) * step;
       return add(plane.origin, add(scale(plane.u, u), scale(plane.v, v)));
     };
+
+    const tagged = (text: string) => (snapNote ? `${snapNote} · ${text}` : text);
 
     const choosePlane = (event: PointerEvent): { plane: Plane; point: Vec3 } | null => {
       const current = propsRef.current;
@@ -747,6 +914,28 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       const current = propsRef.current;
       const tool = current.tool;
       if (tool === 'navigate') return;
+      if (tool === 'measure') {
+        const hit = infer(event);
+        showSnap(hit);
+        const worldPoint = hit?.world ?? pointOnPointer(event);
+        if (!worldPoint) return;
+        const draw = drawRef.current;
+        if (draw?.kind === 'measure') {
+          const locked = { a: draw.origin, b: worldPoint };
+          measureLockRef.current = locked;
+          setMeasureLock(locked);
+          drawRef.current = null;
+          setRubber(null);
+          const delta = sub(worldPoint, draw.origin);
+          report(`거리 ${formatLength(length(delta), current.unit)} · ${formatDelta(delta, current.unit)}`);
+          return;
+        }
+        measureLockRef.current = null;
+        setMeasureLock(null);
+        drawRef.current = { kind: 'measure', origin: worldPoint };
+        report(hit ? `${SNAP_LABEL[hit.kind]} · 다음 점을 찍습니다` : '다음 점을 찍습니다');
+        return;
+      }
       if (tool === 'rect' || tool === 'circle' || tool === 'line') {
         const picked = choosePlane(event);
         if (!picked) return;
@@ -893,7 +1082,38 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       const current = propsRef.current;
       if (current.tool === 'navigate') {
         el.style.cursor = 'grab';
+        snapMarker.visible = false;
         setHover((prev) => (prev ? null : prev));
+        return;
+      }
+      if (current.tool === 'measure') {
+        const hit = infer(event);
+        showSnap(hit);
+        const draw = drawRef.current;
+        if (draw?.kind === 'measure') {
+          const worldPoint = hit?.world ?? pointOnPointer(event);
+          if (!worldPoint) return;
+          setRubber([draw.origin, worldPoint]);
+          const delta = sub(worldPoint, draw.origin);
+          const note = hit ? `${SNAP_LABEL[hit.kind]} · ` : '';
+          report(`${note}거리 ${formatLength(length(delta), current.unit)} · ${formatDelta(delta, current.unit)}`);
+          return;
+        }
+        if (hit?.kind === 'edge' && hit.edgeLength != null) {
+          report(`선 길이 ${formatLength(hit.edgeLength, current.unit)}`);
+          return;
+        }
+        if (hit?.kind === 'center') {
+          const area = areaText(event);
+          report(area ? `중심 · 면적 ${area}` : '중심');
+          return;
+        }
+        if (hit) {
+          report(SNAP_LABEL[hit.kind]);
+          return;
+        }
+        const area = areaText(event);
+        report(area ? `면적 ${area}` : '');
         return;
       }
       const draw = drawRef.current;
@@ -914,9 +1134,9 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
         if (!raw) return;
         let point = snapPoint(raw, draw.plane, event, world);
         if (draw.kind === 'line' && draw.points.length) {
-          point = lockAxis(draw.points[draw.points.length - 1], point, draw.plane);
+          if (!snapNote) point = lockAxis(draw.points[draw.points.length - 1], point, draw.plane);
           setRubber(toWorld(current, [...draw.points, point]));
-          report(formatLength(length(sub(point, draw.points[draw.points.length - 1])), current.unit));
+          report(tagged(formatLength(length(sub(point, draw.points[draw.points.length - 1])), current.unit)));
           return;
         }
         if (draw.kind === 'rect' || draw.kind === 'circle') {
@@ -925,15 +1145,22 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
             const du = dot(sub(point, draw.origin), draw.plane.u);
             const dv = dot(sub(point, draw.origin), draw.plane.v);
             setRubber(toWorld(current, rectanglePoints(draw.origin, draw.plane.u, draw.plane.v, du, dv).concat([draw.origin])));
-            report(`${formatLength(Math.abs(du), current.unit)} × ${formatLength(Math.abs(dv), current.unit)}`);
+            report(tagged(`${formatLength(Math.abs(du), current.unit)} × ${formatLength(Math.abs(dv), current.unit)}`));
           } else {
             const radius = length(sub(point, draw.origin));
             const ring = circleRing(draw.origin, draw.plane, radius);
             setRubber(toWorld(current, ring));
-            report(`반지름 ${formatLength(radius, current.unit)}`);
+            report(tagged(`반지름 ${formatLength(radius, current.unit)}`));
           }
         }
         return;
+      }
+      if (current.tool === 'line' || current.tool === 'rect' || current.tool === 'circle') {
+        const hit = infer(event);
+        showSnap(hit);
+        report(hit ? SNAP_LABEL[hit.kind] : '');
+      } else {
+        snapMarker.visible = false;
       }
       const picked = pick(event);
       const data = picked?.data ?? null;
@@ -979,13 +1206,17 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       if (event.key !== 'Escape') return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
-      if (drawRef.current || previewRef.current) {
+      if (drawRef.current || previewRef.current || measureLockRef.current) {
         drawRef.current = null;
         setPreview(null);
         setRubber(null);
+        measureLockRef.current = null;
+        setMeasureLock(null);
+        snapMarker.visible = false;
         report('');
         return;
       }
+      snapMarker.visible = false;
       propsRef.current.onEscape();
     };
 
@@ -998,22 +1229,36 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
         onDown(event);
       });
     };
+    const onLeave = () => {
+      snapMarker.visible = false;
+    };
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointerleave', onLeave);
     window.addEventListener('keydown', onKey);
     return () => {
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointerleave', onLeave);
       window.removeEventListener('keydown', onKey);
     };
   }, [camera, gl]);
 
   useEffect(() => {
     const el = gl.domElement;
-    el.style.cursor = props.tool === 'navigate' ? 'grab' : '';
+    el.style.cursor = props.tool === 'navigate' ? 'grab' : props.tool === 'measure' ? 'crosshair' : '';
     if (props.tool === 'navigate') setHover(null);
+    if (props.tool !== 'measure') {
+      measureLockRef.current = null;
+      setMeasureLock(null);
+      if (drawRef.current?.kind === 'measure') {
+        drawRef.current = null;
+        setRubber(null);
+      }
+    }
+    snapMarker.visible = false;
   }, [props.tool, gl]);
 
   const applyNumeric = (text: string) => {
@@ -1210,6 +1455,10 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     anchor.current[2] = controls.target.z;
     const distance = camera.position.distanceTo(controls.target);
     orbitHandle.scale.setScalar(Math.max(distance * 0.05, 0.4));
+    if (snapMarker.visible) {
+      const snapDistance = camera.position.distanceTo(snapMarker.position);
+      snapMarker.scale.setScalar(Math.max(snapDistance * 0.035, 0.25));
+    }
   });
 
   return (
@@ -1217,10 +1466,14 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       <primitive object={gridRef.current} />
       <primitive object={axesRef.current} />
       <primitive object={orbitHandle} />
+      <primitive object={snapMarker} />
       <primitive object={sectionSheet} />
       <primitive ref={modelRef} object={built.group} />
       <primitive object={pivot} />
-      {rubber && rubber.length >= 2 && <Line points={rubber} color="#d4533c" lineWidth={2} />}
+      {measureLock && <Line points={[measureLock.a, measureLock.b]} color="#1565c0" lineWidth={2} depthTest={false} />}
+      {rubber && rubber.length >= 2 && (
+        <Line points={rubber} color={props.tool === 'measure' ? '#1565c0' : '#d4533c'} lineWidth={2} depthTest={props.tool === 'measure' ? false : undefined} />
+      )}
       <OrbitControls
         ref={controlsRef}
         makeDefault

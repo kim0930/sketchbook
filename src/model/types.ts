@@ -15,7 +15,8 @@ export type Tool =
   | 'rotate'
   | 'scale'
   | 'paint'
-  | 'erase';
+  | 'erase'
+  | 'measure';
 
 export interface Material {
   id: string;

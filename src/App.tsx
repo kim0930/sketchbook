@@ -37,6 +37,7 @@ import {
   IconErase,
   IconHand,
   IconLine,
+  IconMeasure,
   IconMove,
   IconPaint,
   IconPush,
@@ -53,9 +54,10 @@ import { Viewport } from './viewport/Viewport.tsx';
 const TOOLS: { id: Tool; label: string; key: string; hint: string; icon: ReactNode }[] = [
   { id: 'navigate', label: '탐색', key: 'H', hint: '왼쪽 드래그로 둘러보고, 오른쪽 드래그로 이동합니다. 모델은 선택되지 않습니다.', icon: <IconHand /> },
   { id: 'select', label: '선택', key: 'V', hint: '클릭으로 선택, 더블클릭으로 그룹 안으로 들어갑니다.', icon: <IconSelect /> },
-  { id: 'line', label: '선', key: 'L', hint: '점을 이어서 클릭하고, 시작점에 맞추거나 Enter로 면을 닫습니다.', icon: <IconLine /> },
-  { id: 'rect', label: '사각형', key: 'R', hint: '첫 모서리와 반대 모서리를 찍습니다. 치수는 80, 60 처럼 입력합니다.', icon: <IconRect /> },
-  { id: 'circle', label: '원', key: 'C', hint: '중심을 찍고 반지름을 정합니다.', icon: <IconCircle /> },
+  { id: 'line', label: '선', key: 'L', hint: '점을 이어서 클릭하고, 시작점에 맞추거나 Enter로 면을 닫습니다. 끝점·중간점·선 위에 붙습니다.', icon: <IconLine /> },
+  { id: 'rect', label: '사각형', key: 'R', hint: '첫 모서리와 반대 모서리를 찍습니다. 치수는 80, 60 처럼 입력합니다. 끝점·중간점에 붙습니다.', icon: <IconRect /> },
+  { id: 'circle', label: '원', key: 'C', hint: '중심을 찍고 반지름을 정합니다. 끝점·중간점·중심에 붙습니다.', icon: <IconCircle /> },
+  { id: 'measure', label: '측정', key: 'T', hint: '두 점을 찍으면 거리와 Δx Δy Δz를 재고, 선 위에서는 길이, 면 위에서는 면적을 보여 줍니다.', icon: <IconMeasure /> },
   { id: 'pushpull', label: '밀기/끌기', key: 'P', hint: '면을 드래그해 입체로 만들거나 두께를 바꿉니다.', icon: <IconPush /> },
   { id: 'move', label: '이동', key: 'M', hint: '선택한 뒤 축 핸들을 드래그합니다. 치수는 x, y, z.', icon: <IconMove /> },
   { id: 'rotate', label: '회전', key: 'Q', hint: '선택한 물체를 빨간·초록·파란 축으로 회전합니다.', icon: <IconRotate /> },
@@ -554,7 +556,7 @@ export default function App() {
           {help && (
             <div className="help">
               <p>
-                탐색(H)은 선택 없이 둘러봅니다. 우클릭 드래그로 회전, 휠로 확대, 가운데 버튼으로 이동합니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
+                탐색(H)은 선택 없이 둘러봅니다. 우클릭 드래그로 회전, 휠로 확대, 가운데 버튼으로 이동합니다. 측정(T)은 두 점의 거리를 재고, 선·면 위에서는 길이와 면적을 보여 줍니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
               </p>
               <button type="button" onClick={() => setHelp(false)}>
                 닫기
@@ -622,11 +624,12 @@ export default function App() {
         <span className="tool-hint">
           <b>{activeTool.label}</b> {activeTool.hint}
         </span>
+        {live && <span className="readout">{live}</span>}
         <label className="measure">
           치수
           <input
             value={typed}
-            placeholder={live || '숫자 입력'}
+            placeholder="숫자 입력"
             onChange={(event) => setTyped(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
@@ -646,10 +649,11 @@ export default function App() {
         </select>
         <select
           value={String(snap)}
-          aria-label="스냅"
+          aria-label="모눈 스냅"
+          title="끝점, 중간점, 중심, 선 위 스냅은 항상 동작합니다. 이 값은 빈 평면의 모눈입니다."
           onChange={(event) => setSnap(Number(event.target.value))}
         >
-          <option value="0">스냅 끄기</option>
+          <option value="0">모눈 끄기</option>
           <option value={1 / 25.4}>1 mm</option>
           <option value={10 / 25.4}>10 mm</option>
           <option value="1">1 in</option>

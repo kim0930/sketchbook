@@ -97,6 +97,16 @@ export function IconErase() {
     </Svg>
   );
 }
+export function IconMeasure() {
+  return (
+    <Svg>
+      <path d="M5 15.5h14" />
+      <path d="M5 12.5v6M19 12.5v6M9.5 13.2v4.6M14.5 13.2v4.6" />
+      <path d="M8 8h8" />
+      <path d="M8 5.5v5M16 5.5v5" />
+    </Svg>
+  );
+}
 export function IconUndo() {
   return (
     <Svg>
