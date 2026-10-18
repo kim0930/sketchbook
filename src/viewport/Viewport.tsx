@@ -18,6 +18,7 @@ import {
   PerspectiveCamera,
   Plane as ThreePlane,
   SphereGeometry,
+  TOUCH,
   Vector4,
   Raycaster,
   Vector2,
@@ -187,13 +188,65 @@ function nearlyIdentity(matrix: number[]): boolean {
 
 type SectionCut = { axis: 'x' | 'y' | 'z'; t: number };
 
+function clampPlanZoom(value: number) {
+  return Math.min(24, Math.max(0.2, value));
+}
+
 export function Viewport(props: ViewportProps) {
   const planSlot = useRef<HTMLDivElement>(null);
+  const planZoom = useRef(1);
+  const walkHold = useRef<(dir: 'f' | 'b' | 'l' | 'r', down: boolean) => void>(() => {});
   const [sectionOn, setSectionOn] = useState(false);
   const [sectionAxis, setSectionAxis] = useState<SectionCut['axis']>('z');
   const [sectionT, setSectionT] = useState(0.68);
   const [eyeInches, setEyeInches] = useState(63);
   const bounds = useMemo(() => modelBounds(props.doc), [props.doc]);
+  const wasWalk = useRef(props.tool === 'walk');
+  useEffect(() => {
+    const walking = props.tool === 'walk';
+    if (walking !== wasWalk.current) {
+      planZoom.current = 1;
+      wasWalk.current = walking;
+    }
+  }, [props.tool]);
+  useEffect(() => {
+    const el = planSlot.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      planZoom.current = clampPlanZoom(planZoom.current * (event.deltaY < 0 ? 1.18 : 1 / 1.18));
+    };
+    let pinch = 0;
+    const span = (touches: TouchList) => Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+    const onStart = (event: TouchEvent) => {
+      if (event.touches.length < 2) return;
+      pinch = span(event.touches);
+      event.preventDefault();
+    };
+    const onMove = (event: TouchEvent) => {
+      if (event.touches.length < 2 || pinch <= 0) return;
+      event.preventDefault();
+      const next = span(event.touches);
+      planZoom.current = clampPlanZoom(planZoom.current * (next / pinch));
+      pinch = next;
+    };
+    const onEnd = (event: TouchEvent) => {
+      if (event.touches.length < 2) pinch = 0;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    el.addEventListener('touchstart', onStart, { passive: false });
+    el.addEventListener('touchmove', onMove, { passive: false });
+    el.addEventListener('touchend', onEnd);
+    el.addEventListener('touchcancel', onEnd);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchstart', onStart);
+      el.removeEventListener('touchmove', onMove);
+      el.removeEventListener('touchend', onEnd);
+      el.removeEventListener('touchcancel', onEnd);
+    };
+  }, []);
   const section = sectionOn ? { axis: sectionAxis, t: sectionT } : null;
   const cutInches = bounds
     ? bounds.min[sectionAxis === 'x' ? 0 : sectionAxis === 'y' ? 1 : 2] +
@@ -211,19 +264,29 @@ export function Viewport(props: ViewportProps) {
           camera.up.set(0, 0, 1);
           camera.layers.enable(1);
           gl.localClippingEnabled = true;
+          gl.domElement.style.touchAction = 'none';
         }}
       >
         <color attach="background" args={['#d7e3ee']} />
         <hemisphereLight args={['#f5f9fc', '#eadfce', 0.78]} position={[0, 0, 200]} />
         <directionalLight position={[220, -280, 360]} intensity={1.2} />
         <ambientLight intensity={0.22} />
-        <EditorScene {...props} planSlot={planSlot} section={section} eyeInches={eyeInches} />
+        <EditorScene {...props} planSlot={planSlot} planZoom={planZoom} section={section} eyeInches={eyeInches} walkHold={walkHold} />
       </Canvas>
       <div className="plan-card">
-        <div className="plan-view" ref={planSlot} />
+        <div className="plan-view" ref={planSlot}>
+          <div className="plan-zoom">
+            <button type="button" aria-label="평면도 축소" title="축소" onClick={() => { planZoom.current = clampPlanZoom(planZoom.current / 1.35); }}>
+              −
+            </button>
+            <button type="button" aria-label="평면도 확대" title="확대" onClick={() => { planZoom.current = clampPlanZoom(planZoom.current * 1.35); }}>
+              +
+            </button>
+          </div>
+        </div>
         <div className="plan-tools">
           <header>
-            <b>평면도</b>
+            <b>{props.tool === 'walk' ? '눈높이' : '평면도'}</b>
             <button
               type="button"
               className={sectionOn ? 'on' : ''}
@@ -270,11 +333,47 @@ export function Viewport(props: ViewportProps) {
           )}
         </div>
       </div>
+      {props.tool === 'walk' && (
+        <div className="walk-pad" aria-label="걷기 이동">
+          {(
+            [
+              ['f', '앞', 'walk-f'],
+              ['l', '왼쪽', 'walk-l'],
+              ['b', '뒤', 'walk-b'],
+              ['r', '오른쪽', 'walk-r'],
+            ] as const
+          ).map(([dir, label, className]) => (
+            <button
+              key={dir}
+              type="button"
+              className={className}
+              aria-label={label}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                walkHold.current(dir, true);
+              }}
+              onPointerUp={() => walkHold.current(dir, false)}
+              onPointerCancel={() => walkHold.current(dir, false)}
+            >
+              {label === '왼쪽' ? '좌' : label === '오른쪽' ? '우' : label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement | null>; section: SectionCut | null; eyeInches: number }) {
+function EditorScene(
+  props: ViewportProps & {
+    planSlot: RefObject<HTMLDivElement | null>;
+    planZoom: RefObject<number>;
+    section: SectionCut | null;
+    eyeInches: number;
+    walkHold: RefObject<(dir: 'f' | 'b' | 'l' | 'r', down: boolean) => void>;
+  },
+) {
   const { camera, gl, scene } = useThree();
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -388,6 +487,15 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
   useEffect(() => {
     const planCam = new OrthographicCamera(-1, 1, 1, -1, 0.1, 100000);
     planCam.layers.set(0);
+    planCam.layers.enable(2);
+    const personMark = new Mesh(
+      new SphereGeometry(1, 14, 10),
+      new MeshBasicMaterial({ color: 0xd4533c, depthTest: false }),
+    );
+    personMark.layers.set(2);
+    personMark.raycast = () => {};
+    personMark.visible = false;
+    scene.add(personMark);
     const clear = new Color();
     const viewport = new Vector4();
     const scissor = new Vector4();
@@ -411,16 +519,38 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       const size = bounds
         ? new Vector3(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2])
         : new Vector3(80, 60, 32);
-      const half = Math.max(size.x, size.y, 8) * 0.62;
-      planCam.left = -half;
-      planCam.right = half;
-      planCam.top = half;
-      planCam.bottom = -half;
+      const zoom = clampPlanZoom(propsRef.current.planZoom.current);
+      const aspect = width / Math.max(height, 1);
+      const walking = propsRef.current.tool === 'walk';
+      const mainCam = camera as PerspectiveCamera;
       planCam.up.set(0, 1, 0);
-      planCam.position.set(center.x, center.y, center.z + Math.max(size.z, 1) + 80);
-      planCam.lookAt(center.x, center.y, center.z);
-      planCam.near = 0.1;
-      planCam.far = Math.max(size.z, 1) * 6 + 500;
+      const fittedHalf = Math.max(size.y * 0.5, size.x * 0.5 / aspect, 4) * 1.12 / zoom;
+      if (walking) {
+        const eye = mainCam.position.z;
+        planCam.position.set(mainCam.position.x, mainCam.position.y, eye + 2);
+        planCam.lookAt(mainCam.position.x, mainCam.position.y, eye - 10);
+        planCam.near = 0.4;
+        const floor = bounds?.min[2] ?? eye - 120;
+        planCam.far = Math.max(eye + 2 - floor + 80, 200);
+        planCam.top = fittedHalf;
+        planCam.bottom = -fittedHalf;
+        planCam.right = fittedHalf * aspect;
+        planCam.left = -fittedHalf * aspect;
+        personMark.visible = true;
+        personMark.scale.setScalar(Math.max(fittedHalf * 0.04, 6));
+        personMark.position.set(mainCam.position.x, mainCam.position.y, eye - 1);
+      } else {
+        personMark.visible = false;
+        const halfY = fittedHalf;
+        planCam.position.set(center.x, center.y, center.z + Math.max(size.z, 1) + 80);
+        planCam.lookAt(center.x, center.y, center.z);
+        planCam.near = 0.1;
+        planCam.far = Math.max(size.z, 1) * 6 + 500;
+        planCam.top = halfY;
+        planCam.bottom = -halfY;
+        planCam.right = halfY * aspect;
+        planCam.left = -halfY * aspect;
+      }
       planCam.updateProjectionMatrix();
       gl.getViewport(viewport);
       gl.getScissor(scissor);
@@ -438,11 +568,31 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       gl.setScissorTest(scissorTest);
       gl.setClearColor(clear, alpha);
     });
-    return () => remove();
+    return () => {
+      remove();
+      scene.remove(personMark);
+      personMark.geometry.dispose();
+      const material = personMark.material;
+      if (material instanceof MeshBasicMaterial) material.dispose();
+    };
   }, [gl, scene, props.planSlot]);
 
   useEffect(() => {
     const el = gl.domElement;
+    const zoomBy = (factor: number) => {
+      const controls = controlsRef.current;
+      if (!controls) return;
+      const cam = camera as PerspectiveCamera;
+      const offset = cam.position.clone().sub(controls.target);
+      const distance = Math.min(Math.max(offset.length() * factor, 0.3), 1e8);
+      if (offset.lengthSq() < 1e-8) offset.set(1, -1, 0.7);
+      offset.setLength(distance);
+      cam.position.copy(controls.target).add(offset);
+      cam.near = Math.max(distance / 5000, 0.01);
+      cam.far = distance * 50;
+      cam.updateProjectionMatrix();
+      controls.update();
+    };
     const onWheel = (event: WheelEvent) => {
       const controls = controlsRef.current;
       if (!controls) return;
@@ -454,21 +604,49 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
         walkApi.current.step(fx * distance, fy * distance, fz * distance);
         return;
       }
-      const cam = camera as PerspectiveCamera;
       const pixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 400 : event.deltaY;
-      const factor = Math.pow(1.48, pixels / 100);
-      const offset = cam.position.clone().sub(controls.target);
-      const distance = Math.min(Math.max(offset.length() * factor, 0.3), 1e8);
-      if (offset.lengthSq() < 1e-8) offset.set(1, -1, 0.7);
-      offset.setLength(distance);
-      cam.position.copy(controls.target).add(offset);
-      cam.near = Math.max(distance / 5000, 0.01);
-      cam.far = distance * 50;
-      cam.updateProjectionMatrix();
-      controls.update();
+      zoomBy(Math.pow(1.48, pixels / 100));
+    };
+    let pinch = 0;
+    const pinchSpan = (touches: TouchList) => {
+      const a = touches[0];
+      const b = touches[1];
+      return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    };
+    const onTouchStart = (event: TouchEvent) => {
+      if (event.touches.length < 2) return;
+      pinch = pinchSpan(event.touches);
+      event.preventDefault();
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      if (event.touches.length < 2 || pinch <= 0) return;
+      event.preventDefault();
+      const span = pinchSpan(event.touches);
+      const ratio = pinch / span;
+      pinch = span;
+      if (propsRef.current.tool === 'walk') {
+        const distance = Math.max(-110, Math.min(110, (1 - ratio) * 280));
+        const { fx, fy, fz } = walkApi.current.basis();
+        walkApi.current.step(fx * distance, fy * distance, fz * distance);
+        return;
+      }
+      zoomBy(ratio);
+    };
+    const onTouchEnd = (event: TouchEvent) => {
+      if (event.touches.length < 2) pinch = 0;
     };
     el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
+    el.addEventListener('touchstart', onTouchStart, { passive: false });
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    el.addEventListener('touchend', onTouchEnd);
+    el.addEventListener('touchcancel', onTouchEnd);
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
+    };
   }, [camera, gl]);
 
   useEffect(() => {
@@ -1081,6 +1259,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     };
 
     const onMove = (event: PointerEvent) => {
+      if (pointers.size > 1) return;
       if (moveOrbit(event)) {
         el.style.cursor = 'grabbing';
         return;
@@ -1195,6 +1374,8 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     };
 
     const onUp = (event: PointerEvent) => {
+      pointers.delete(event.pointerId);
+      if (pointers.size > 0) return;
       if (propsRef.current.tool === 'walk') {
         walkLook.current = null;
         el.style.cursor = 'crosshair';
@@ -1244,7 +1425,16 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       propsRef.current.onEscape();
     };
 
+    const pointers = new Set<number>();
     const down = (event: PointerEvent) => {
+      pointers.add(event.pointerId);
+      if (pointers.size > 1) {
+        drawRef.current = null;
+        setPreview(null);
+        setRubber(null);
+        walkLook.current = null;
+        return;
+      }
       if (event.button !== 0) return;
       if (propsRef.current.tool === 'walk') {
         walkLook.current = { x: event.clientX, y: event.clientY };
@@ -1282,9 +1472,18 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       event.preventDefault();
       walkKeys.current[slot] = down;
     };
+    const onCancel = (event: PointerEvent) => {
+      pointers.delete(event.pointerId);
+      walkLook.current = null;
+      if (pointers.size > 0) return;
+      drawRef.current = null;
+      setPreview(null);
+      setRubber(null);
+    };
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onCancel);
     el.addEventListener('pointerleave', onLeave);
     window.addEventListener('keydown', onKey);
     window.addEventListener('keydown', onWalkKey);
@@ -1293,6 +1492,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
+      el.removeEventListener('pointercancel', onCancel);
       el.removeEventListener('pointerleave', onLeave);
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keydown', onWalkKey);
@@ -1573,6 +1773,9 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
         ly: -Math.sin(yaw),
       };
     };
+    props.walkHold.current = (dir, down) => {
+      walkKeys.current[dir] = down;
+    };
     walkApi.current = {
       begin() {
         const controls = controlsRef.current;
@@ -1658,6 +1861,11 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
           props.tool === 'navigate'
             ? { LEFT: MOUSE.ROTATE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.PAN }
             : { LEFT: -1 as MOUSE, MIDDLE: MOUSE.PAN, RIGHT: MOUSE.ROTATE }
+        }
+        touches={
+          props.tool === 'navigate'
+            ? { ONE: TOUCH.ROTATE, TWO: TOUCH.DOLLY_PAN }
+            : { ONE: -1 as TOUCH, TWO: TOUCH.DOLLY_PAN }
         }
       />
       {showGizmo && (

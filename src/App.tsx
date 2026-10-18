@@ -121,6 +121,25 @@ function parseInWorker(
   });
 }
 
+const DEFAULT_MODEL = '261015_과천 과천동 3D_v2017.skp';
+
+let defaultModelBuffer: Promise<ArrayBuffer> | null = null;
+
+function loadDefaultModel(): Promise<ArrayBuffer> {
+  if (!defaultModelBuffer) {
+    defaultModelBuffer = fetch(`${import.meta.env.BASE_URL}default.skp`)
+      .then((response) => {
+        if (!response.ok) throw new Error('기본 모형을 찾지 못했습니다');
+        return response.arrayBuffer();
+      })
+      .catch((error: unknown) => {
+        defaultModelBuffer = null;
+        throw error;
+      });
+  }
+  return defaultModelBuffer;
+}
+
 function validPath(doc: SketchDocument, path: string[]): string[] {
   const next: string[] = [];
   for (const id of path) {
@@ -131,7 +150,7 @@ function validPath(doc: SketchDocument, path: string[]): string[] {
 }
 
 export default function App() {
-  const [doc, setDoc] = useState<SketchDocument>(() => createStarter());
+  const [doc, setDoc] = useState<SketchDocument>(() => createEmpty());
   const [past, setPast] = useState<SketchDocument[]>([]);
   const [future, setFuture] = useState<SketchDocument[]>([]);
   const [tool, setTool] = useState<Tool>('select');
@@ -145,11 +164,12 @@ export default function App() {
   const [typed, setTyped] = useState('');
   const [live, setLive] = useState('');
   const [dirty, setDirty] = useState(false);
-  const [loading, setLoading] = useState<string | null>(null);
+  const [loading, setLoading] = useState<string | null>('스케치업 파일을 읽고 있습니다');
   const [toasts, setToasts] = useState<string[]>([]);
   const [help, setHelp] = useState(true);
   const [menu, setMenu] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [libraryBusy, setLibraryBusy] = useState<string | null>(null);
   const [viewToken, setViewToken] = useState(1);
   const [viewCommand, setViewCommand] = useState<ViewportCommand>(null);
@@ -157,6 +177,7 @@ export default function App() {
   toolRef.current = tool;
   const [numericRequest, setNumericRequest] = useState<{ id: number; text: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const skipDefault = useRef(false);
   const docRef = useRef(doc);
   const placeAnchorRef = useRef<Vec3 | null>(null);
   const dropSlot = useRef(0);
@@ -181,6 +202,7 @@ export default function App() {
   };
 
   const replaceDoc = (next: SketchDocument) => {
+    skipDefault.current = true;
     setDoc(next);
     setPast([]);
     setFuture([]);
@@ -254,7 +276,8 @@ export default function App() {
     });
   };
 
-  const openBuffer = async (buffer: ArrayBuffer, filename: string) => {
+  const openBuffer = async (buffer: ArrayBuffer, filename: string, mode?: 'default') => {
+    if (mode === 'default' && skipDefault.current) return;
     setLoading('스케치업 파일을 읽고 있습니다');
     await new Promise((resolve) => window.setTimeout(resolve, 40));
     try {
@@ -275,6 +298,7 @@ export default function App() {
       doc = { ...doc, name: filename.replace(/\.skp$/i, '') || '모델' };
       setLoading('화면을 만들고 있습니다');
       await new Promise((resolve) => window.requestAnimationFrame(() => resolve(undefined)));
+      if (mode === 'default' && skipDefault.current) return;
       replaceDoc(doc);
       const note = doc.sourceVersion ? `SketchUp ${doc.sourceVersion}` : '스케치업 파일';
       toast(warnings[0] ? `${note}을 열었습니다. ${warnings[0]}` : `${note}을 열었습니다.`);
@@ -288,6 +312,7 @@ export default function App() {
   };
 
   const openFile = async (file: File) => {
+    skipDefault.current = true;
     if (!file.name.toLowerCase().endsWith('.skp')) {
       toast('.skp 파일만 열 수 있습니다.');
       return;
@@ -298,6 +323,32 @@ export default function App() {
     }
     await openBuffer(await file.arrayBuffer(), file.name);
   };
+
+  const openBufferRef = useRef(openBuffer);
+  openBufferRef.current = openBuffer;
+
+  useEffect(() => {
+    let cancel = false;
+    loadDefaultModel()
+      .then((buffer) => {
+        if (cancel || skipDefault.current) {
+          if (!cancel) setLoading(null);
+          return;
+        }
+        const megabytes = buffer.byteLength / (1024 * 1024);
+        if (megabytes > 40) toast(`${megabytes.toFixed(0)}MB 파일입니다. 읽는 동안 이 탭을 그대로 두세요.`);
+        return openBufferRef.current(buffer.slice(0), DEFAULT_MODEL, 'default');
+      })
+      .catch((error) => {
+        if (cancel) return;
+        console.error(error);
+        setLoading(null);
+        toast(error instanceof Error ? error.message : '기본 모형을 열지 못했습니다.');
+      });
+    return () => {
+      cancel = true;
+    };
+  }, []);
 
   const saveSkp = () => {
     try {
@@ -422,7 +473,7 @@ export default function App() {
   const paintId = drawMaterialId ?? doc.defaultMaterialId;
 
   return (
-    <div className="app">
+    <div className={inspectorOpen ? 'app inspector-open' : 'app'}>
       <header className="topbar">
         <div className="brand">
           <span className="mark" aria-hidden="true" />
@@ -478,8 +529,26 @@ export default function App() {
           <button type="button" onClick={() => replaceDoc(createStarter())}>
             예제
           </button>
-          <button type="button" className={libraryOpen ? 'on' : ''} onClick={() => setLibraryOpen((open) => !open)}>
+          <button
+            type="button"
+            className={libraryOpen ? 'on' : ''}
+            onClick={() => {
+              setLibraryOpen((open) => !open);
+              setInspectorOpen(false);
+            }}
+          >
             라이브러리
+          </button>
+          <button
+            type="button"
+            className={inspectorOpen ? 'inspector-btn on' : 'inspector-btn'}
+            aria-pressed={inspectorOpen}
+            onClick={() => {
+              setInspectorOpen((open) => !open);
+              setLibraryOpen(false);
+            }}
+          >
+            속성
           </button>
           <button type="button" className="icon-btn" disabled={!past.length} onClick={undo} title="실행 취소 (Ctrl+Z)">
             <IconUndo />
@@ -518,6 +587,9 @@ export default function App() {
         </nav>
         {libraryOpen && <LibraryPanel busyId={libraryBusy} onImport={(entry) => void importEntry(entry)} onClose={() => setLibraryOpen(false)} />}
 
+        {inspectorOpen && (
+          <button type="button" className="sheet-backdrop" aria-label="속성 닫기" onClick={() => setInspectorOpen(false)} />
+        )}
         <div className="stage">
           {path.length > 0 && (
             <div className="banner">
@@ -573,6 +645,7 @@ export default function App() {
             <div className="help">
               <p>
                 탐색(H)은 선택 없이 둘러봅니다. 걷기(K)는 사람 시점으로 벽을 통과해 움직이고, 눈높이를 조절할 수 있습니다. 측정(T)은 두 점의 거리를 재고, 선·면 위에서는 길이와 면적을 보여 줍니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
+                <span className="touch-help"> 한 손가락은 고른 도구이고, 두 손가락으로 밀면 화면이 움직이고 벌리면 확대됩니다. 걷기에서는 화면을 끌어 둘러보고 오른쪽 버튼으로 이동합니다.</span>
               </p>
               <button type="button" onClick={() => setHelp(false)}>
                 닫기
