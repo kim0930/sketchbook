@@ -208,6 +208,9 @@ button:disabled { opacity: 0.35; cursor: default; }
 .plan-view.panning {
   cursor: grabbing;
 }
+.plan-view.aiming {
+  cursor: move;
+}
 .plan-resize {
   position: absolute;
   right: 4px;

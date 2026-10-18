@@ -215,14 +215,29 @@ function clampPlanZoom(value: number) {
 const PLAN_ZOOM_HOME = 2;
 
 type PlanPan = { x: number; y: number };
-type PlanMetrics = { halfX: number; halfY: number; width: number; height: number; lookX: number; lookY: number };
+type PlanMetrics = {
+  halfX: number;
+  halfY: number;
+  width: number;
+  height: number;
+  lookX: number;
+  lookY: number;
+  markX: number;
+  markY: number;
+  markFollowsEye: boolean;
+};
+type PlanAim = { seq: number; x: number; y: number; eye: boolean };
 
 export function Viewport(props: ViewportProps) {
   const planSlot = useRef<HTMLDivElement>(null);
   const planZoom = useRef(PLAN_ZOOM_HOME);
   const planPan = useRef<PlanPan>({ x: 0, y: 0 });
-  const planMetrics = useRef<PlanMetrics>({ halfX: 1, halfY: 1, width: 1, height: 1, lookX: 0, lookY: 0 });
-  const [planFocus, setPlanFocus] = useState<{ id: number; x: number; y: number } | null>(null);
+  const planMetrics = useRef<PlanMetrics>({ halfX: 1, halfY: 1, width: 1, height: 1, lookX: 0, lookY: 0, markX: 0, markY: 0, markFollowsEye: false });
+  const toolRef = useRef(props.tool);
+  toolRef.current = props.tool;
+  const planAim = useRef<PlanAim | null>(null);
+  const planAiming = useRef(false);
+  const planAnchor = useRef<{ x: number; y: number } | null>(null);
   const [planSize, setPlanSize] = useState<{ w: number; h: number } | null>(null);
   const walkHold = useRef<(dir: 'f' | 'b' | 'l' | 'r', down: boolean) => void>(() => {});
   const [sectionOn, setSectionOn] = useState(false);
@@ -264,62 +279,97 @@ export function Viewport(props: ViewportProps) {
     const onEnd = (event: TouchEvent) => {
       if (event.touches.length < 2) pinch = 0;
     };
-    let pointers = 0;
-    let drag: { id: number; x: number; y: number; startX: number; startY: number; moved: boolean } | null = null;
+    const pointers = new Set<number>();
+    let drag: { id: number; x: number; y: number; startX: number; startY: number; moved: boolean; aim: boolean } | null = null;
     let clickStamp = 0;
-    let focusTimer = 0;
     const fromButton = (event: Event) => (event.target as Element | null)?.closest('button');
-    const stopDrag = () => {
+    const onMarker = (clientX: number, clientY: number) => {
+      const metrics = planMetrics.current;
+      const rect = el.getBoundingClientRect();
+      if (metrics.width < 8 || metrics.halfX < 1e-4 || metrics.halfY < 1e-4) return false;
+      const nx = (metrics.markX - metrics.lookX) / (2 * metrics.halfX) + 0.5;
+      const ny = 0.5 - (metrics.markY - metrics.lookY) / (2 * metrics.halfY);
+      if (nx < -0.08 || nx > 1.08 || ny < -0.08 || ny > 1.08) return false;
+      const sx = rect.left + nx * rect.width;
+      const sy = rect.top + ny * rect.height;
+      const radius = Math.max(26, Math.min(rect.width, rect.height) * 0.16);
+      return Math.hypot(clientX - sx, clientY - sy) <= radius;
+    };
+    const aimAt = (clientX: number, clientY: number, eye: boolean) => {
+      const metrics = planMetrics.current;
+      const rect = el.getBoundingClientRect();
+      const nx = (clientX - rect.left) / Math.max(rect.width, 1);
+      const ny = (clientY - rect.top) / Math.max(rect.height, 1);
+      planAim.current = {
+        seq: (planAim.current?.seq ?? 0) + 1,
+        x: metrics.lookX + (nx - 0.5) * 2 * metrics.halfX,
+        y: metrics.lookY + (0.5 - ny) * 2 * metrics.halfY,
+        eye,
+      };
+    };
+    const endGesture = () => {
       drag = null;
-      el.classList.remove('panning');
+      planAiming.current = false;
+      el.classList.remove('panning', 'aiming');
     };
     const onPointerDown = (event: PointerEvent) => {
-      pointers += 1;
-      if (event.button !== 0 || fromButton(event) || pointers > 1) {
-        stopDrag();
+      if (fromButton(event)) return;
+      if (event.pointerType === 'mouse' && event.button !== 0) return;
+      pointers.add(event.pointerId);
+      if (pointers.size > 1) {
+        endGesture();
         return;
       }
-      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false };
+      const aim = onMarker(event.clientX, event.clientY);
+      if (aim) {
+        planAnchor.current = {
+          x: planMetrics.current.lookX - planPan.current.x,
+          y: planMetrics.current.lookY - planPan.current.y,
+        };
+        planAiming.current = true;
+      }
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false, aim };
       try { el.setPointerCapture(event.pointerId); } catch { /* pointer already released */ }
       event.preventDefault();
     };
     const onPointerMove = (event: PointerEvent) => {
-      if (!drag || event.pointerId !== drag.id) return;
+      if (!drag || event.pointerId !== drag.id) {
+        if (!drag) el.classList.toggle('aiming', onMarker(event.clientX, event.clientY));
+        return;
+      }
       if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4) {
         drag.moved = true;
-        el.classList.add('panning');
+        el.classList.toggle('panning', !drag.aim);
+        el.classList.toggle('aiming', drag.aim);
       }
       if (!drag.moved) return;
+      if (drag.aim) {
+        aimAt(event.clientX, event.clientY, toolRef.current === 'walk' || planMetrics.current.markFollowsEye);
+        return;
+      }
       const dx = event.clientX - drag.x;
       const dy = event.clientY - drag.y;
       drag.x = event.clientX;
       drag.y = event.clientY;
       const metrics = planMetrics.current;
-      if (metrics.width < 1 || metrics.height < 1) return;
+      if (metrics.width < 2 || metrics.height < 2) return;
       planPan.current.x -= dx * ((metrics.halfX * 2) / metrics.width);
       planPan.current.y += dy * ((metrics.halfY * 2) / metrics.height);
     };
     const onPointerUp = (event: PointerEvent) => {
-      pointers = Math.max(0, pointers - 1);
+      if (!pointers.has(event.pointerId) && drag?.id !== event.pointerId) return;
+      pointers.delete(event.pointerId);
       const finished = drag?.id === event.pointerId ? drag : null;
-      if (finished) stopDrag();
-      if (!finished || finished.moved) return;
+      if (!finished) return;
+      endGesture();
+      if (finished.moved) return;
       const now = performance.now();
       if (now - clickStamp < 280) {
-        window.clearTimeout(focusTimer);
         clickStamp = 0;
         return;
       }
       clickStamp = now;
-      const metrics = planMetrics.current;
-      const rect = el.getBoundingClientRect();
-      const nx = (finished.startX - rect.left) / Math.max(rect.width, 1);
-      const ny = (finished.startY - rect.top) / Math.max(rect.height, 1);
-      const x = metrics.lookX + (nx - 0.5) * 2 * metrics.halfX;
-      const y = metrics.lookY + (0.5 - ny) * 2 * metrics.halfY;
-      focusTimer = window.setTimeout(() => {
-        if (clickStamp === now) setPlanFocus({ id: now, x, y });
-      }, 280);
+      aimAt(finished.startX, finished.startY, toolRef.current === 'walk' || (finished.aim && planMetrics.current.markFollowsEye));
     };
     const onDoubleClick = (event: MouseEvent) => {
       if (fromButton(event)) return;
@@ -331,9 +381,9 @@ export function Viewport(props: ViewportProps) {
     el.addEventListener('touchend', onEnd);
     el.addEventListener('touchcancel', onEnd);
     el.addEventListener('pointerdown', onPointerDown);
-    el.addEventListener('pointermove', onPointerMove);
-    el.addEventListener('pointerup', onPointerUp);
-    el.addEventListener('pointercancel', onPointerUp);
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
     el.addEventListener('dblclick', onDoubleClick);
     return () => {
       el.removeEventListener('wheel', onWheel);
@@ -342,12 +392,12 @@ export function Viewport(props: ViewportProps) {
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onEnd);
       el.removeEventListener('pointerdown', onPointerDown);
-      el.removeEventListener('pointermove', onPointerMove);
-      el.removeEventListener('pointerup', onPointerUp);
-      el.removeEventListener('pointercancel', onPointerUp);
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
       el.removeEventListener('dblclick', onDoubleClick);
-      el.classList.remove('panning');
-      window.clearTimeout(focusTimer);
+      planAiming.current = false;
+      el.classList.remove('panning', 'aiming');
     };
   }, []);
   useEffect(() => {
@@ -385,10 +435,10 @@ export function Viewport(props: ViewportProps) {
         <hemisphereLight args={['#f5f9fc', '#eadfce', 0.78]} position={[0, 0, 200]} />
         <directionalLight position={[220, -280, 360]} intensity={1.2} />
         <ambientLight intensity={0.22} />
-        <EditorScene {...props} planSlot={planSlot} planZoom={planZoom} planPan={planPan} planMetrics={planMetrics} planFocus={planFocus} section={section} eyeInches={eyeInches} walkHold={walkHold} />
+        <EditorScene {...props} planSlot={planSlot} planZoom={planZoom} planPan={planPan} planMetrics={planMetrics} planAim={planAim} planAiming={planAiming} planAnchor={planAnchor} section={section} eyeInches={eyeInches} walkHold={walkHold} />
       </Canvas>
       <div className="plan-card">
-        <div className="plan-view" ref={planSlot} role="application" aria-label="평면도" title="드래그하여 이동 · 클릭하면 그곳을 봅니다 · 두 번 클릭하면 가운데로">
+        <div className="plan-view" ref={planSlot} role="application" aria-label="평면도" title="빈 곳을 끌면 평면도가 움직입니다 · 빨간 표시를 끌거나 클릭하면 보는 위치가 이동합니다 · 두 번 클릭하면 가운데로">
           <button
             type="button"
             className="plan-resize"
@@ -512,7 +562,9 @@ function EditorScene(
     planZoom: RefObject<number>;
     planPan: RefObject<PlanPan>;
     planMetrics: RefObject<PlanMetrics>;
-    planFocus: { id: number; x: number; y: number } | null;
+    planAim: RefObject<PlanAim | null>;
+    planAiming: RefObject<boolean>;
+    planAnchor: RefObject<{ x: number; y: number } | null>;
     section: SectionCut | null;
     eyeInches: number;
     walkHold: RefObject<(dir: 'f' | 'b' | 'l' | 'r', down: boolean) => void>;
@@ -529,6 +581,7 @@ function EditorScene(
   const walkLook = useRef<{ x: number; y: number } | null>(null);
   const walkYaw = useRef(0);
   const walkPitch = useRef(-0.08);
+  const planAimSeq = useRef(0);
   const eyeApplied = useRef(props.eyeInches);
   const walkApi = useRef({
     begin: () => {},
@@ -691,8 +744,9 @@ function EditorScene(
       const mainCam = camera as PerspectiveCamera;
       planCam.up.set(0, 1, 0);
       const fittedHalf = Math.max(size.y * 0.5, size.x * 0.5 / aspect, 4) * 1.12 / zoom;
-      const lookX = (walking ? mainCam.position.x : center.x) + pan.x;
-      const lookY = (walking ? mainCam.position.y : center.y) + pan.y;
+      const held = propsRef.current.planAnchor.current;
+      const lookX = (held ? held.x : walking ? mainCam.position.x : center.x) + pan.x;
+      const lookY = (held ? held.y : walking ? mainCam.position.y : center.y) + pan.y;
       if (walking) {
         const eye = mainCam.position.z;
         planCam.position.set(lookX, lookY, eye + 2);
@@ -722,6 +776,9 @@ function EditorScene(
         height,
         lookX,
         lookY,
+        markX: 0,
+        markY: 0,
+        markFollowsEye: false,
       };
       const controls = controlsRef.current;
       if (controls) lookFlat.copy(controls.target).sub(mainCam.position);
@@ -737,6 +794,9 @@ function EditorScene(
       const markX = walking || camInside ? mainCam.position.x : focusX;
       const markY = walking || camInside ? mainCam.position.y : focusY;
       viewMark.visible = true;
+      propsRef.current.planMetrics.current.markX = markX;
+      propsRef.current.planMetrics.current.markY = markY;
+      propsRef.current.planMetrics.current.markFollowsEye = walking || camInside;
       viewMark.position.set(markX, markY, planCam.position.z - 24);
       viewMark.scale.setScalar(Math.max(fittedHalf * 0.22, 6));
       viewMark.rotation.z = Math.atan2(-lookFlat.x, lookFlat.y);
@@ -969,24 +1029,6 @@ function EditorScene(
   }, [props.viewCommand]);
 
   useLayoutEffect(() => {
-    const focus = props.planFocus;
-    if (!focus) return;
-    const cam = camera as PerspectiveCamera;
-    if (propsRef.current.tool === 'walk') {
-      cam.position.x = focus.x;
-      cam.position.y = focus.y;
-      walkApi.current.look(0, 0);
-      return;
-    }
-    const controls = controlsRef.current;
-    const from = controls ? controls.target.clone() : cam.position.clone();
-    const direction = cam.position.clone().sub(from);
-    if (direction.lengthSq() < 1e-6) direction.set(0.78, -1, 0.58);
-    lookAtTarget(new Vector3(focus.x, focus.y, from.z), direction.normalize(), Math.max(direction.length(), 8));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.planFocus]);
-
-  useLayoutEffect(() => {
     if (gizmoDrag.current) return;
     const center = selectionCenter(shown, props.selection);
     if (!center) return;
@@ -1090,6 +1132,7 @@ function EditorScene(
   useEffect(() => {
     const el = gl.domElement;
     const raycaster = new Raycaster();
+    raycaster.layers.enable(1);
 
     const ndc = (event: PointerEvent) => {
       const rect = el.getBoundingClientRect();
@@ -2490,6 +2533,39 @@ function EditorScene(
       } else walkApi.current.step(0, 0, 0);
     } else orbitHandle.visible = true;
     const controls = controlsRef.current;
+    const aim = propsRef.current.planAim.current;
+    if (aim && aim.seq !== planAimSeq.current) {
+      planAimSeq.current = aim.seq;
+      const cam = camera as PerspectiveCamera;
+      if (props.tool === 'walk' || aim.eye) {
+        const dx = aim.x - cam.position.x;
+        const dy = aim.y - cam.position.y;
+        cam.position.x = aim.x;
+        cam.position.y = aim.y;
+        if (props.tool === 'walk') walkApi.current.look(0, 0);
+        else if (controls) {
+          controls.target.x += dx;
+          controls.target.y += dy;
+          controls.update();
+        }
+      } else if (controls) {
+        const dx = aim.x - controls.target.x;
+        const dy = aim.y - controls.target.y;
+        controls.target.x = aim.x;
+        controls.target.y = aim.y;
+        cam.position.x += dx;
+        cam.position.y += dy;
+        controls.update();
+      }
+    }
+    if (!propsRef.current.planAiming.current && propsRef.current.planAnchor.current) {
+      const anchor = propsRef.current.planAnchor.current;
+      if (props.tool === 'walk') {
+        propsRef.current.planPan.current.x += anchor.x - camera.position.x;
+        propsRef.current.planPan.current.y += anchor.y - camera.position.y;
+      }
+      propsRef.current.planAnchor.current = null;
+    }
     if (!controls) return;
     orbitHandle.position.copy(controls.target);
     const anchor = props.placeAnchorRef;
