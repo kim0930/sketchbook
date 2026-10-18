@@ -1594,7 +1594,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       },
       look(dx, dy) {
         walkYaw.current -= dx * 0.0042;
-        walkPitch.current = Math.max(-1.15, Math.min(1.15, walkPitch.current - dy * 0.0034));
+        walkPitch.current = Math.max(-1.15, Math.min(1.15, walkPitch.current + dy * 0.0034));
         applyLook();
       },
       step,
