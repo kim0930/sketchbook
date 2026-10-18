@@ -47,12 +47,14 @@ import {
   IconScale,
   IconSelect,
   IconUndo,
+  IconWalk,
 } from './ui/icons.tsx';
 import { LibraryPanel } from './ui/LibraryPanel.tsx';
 import { Viewport } from './viewport/Viewport.tsx';
 
 const TOOLS: { id: Tool; label: string; key: string; hint: string; icon: ReactNode }[] = [
   { id: 'navigate', label: '탐색', key: 'H', hint: '왼쪽 드래그로 둘러보고, 오른쪽 드래그로 이동합니다. 모델은 선택되지 않습니다.', icon: <IconHand /> },
+  { id: 'walk', label: '걷기', key: 'K', hint: '바라보는 방향으로 WASD·방향키가 움직입니다. 벽은 통과하고, Shift는 더 빠릅니다. 눈높이는 평면도 아래에서 조절합니다.', icon: <IconWalk /> },
   { id: 'select', label: '선택', key: 'V', hint: '클릭으로 선택, 더블클릭으로 그룹 안으로 들어갑니다.', icon: <IconSelect /> },
   { id: 'line', label: '선', key: 'L', hint: '점을 이어서 클릭하고, 시작점에 맞추거나 Enter로 면을 닫습니다. 끝점·중간점·선 위에 붙습니다.', icon: <IconLine /> },
   { id: 'rect', label: '사각형', key: 'R', hint: '첫 모서리와 반대 모서리를 찍습니다. 치수는 80, 60 처럼 입력합니다. 끝점·중간점에 붙습니다.', icon: <IconRect /> },
@@ -151,6 +153,8 @@ export default function App() {
   const [libraryBusy, setLibraryBusy] = useState<string | null>(null);
   const [viewToken, setViewToken] = useState(1);
   const [viewCommand, setViewCommand] = useState<ViewportCommand>(null);
+  const toolRef = useRef(tool);
+  toolRef.current = tool;
   const [numericRequest, setNumericRequest] = useState<{ id: number; text: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const docRef = useRef(doc);
@@ -346,6 +350,18 @@ export default function App() {
         return;
       }
       if (typing) return;
+      if (toolRef.current === 'walk') {
+        const key = event.key.toLowerCase();
+        if (key === 'escape') {
+          event.preventDefault();
+          setTool('navigate');
+          return;
+        }
+        if (key === 'f' || key === 'w' || key === 'a' || key === 's' || key === 'd' || key.startsWith('arrow')) {
+          event.preventDefault();
+          return;
+        }
+      }
       if (event.key === 'Backspace' && typed) {
         event.preventDefault();
         setTyped((value) => value.slice(0, -1));
@@ -556,7 +572,7 @@ export default function App() {
           {help && (
             <div className="help">
               <p>
-                탐색(H)은 선택 없이 둘러봅니다. 우클릭 드래그로 회전, 휠로 확대, 가운데 버튼으로 이동합니다. 측정(T)은 두 점의 거리를 재고, 선·면 위에서는 길이와 면적을 보여 줍니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
+                탐색(H)은 선택 없이 둘러봅니다. 걷기(K)는 사람 시점으로 벽을 통과해 움직이고, 눈높이를 조절할 수 있습니다. 측정(T)은 두 점의 거리를 재고, 선·면 위에서는 길이와 면적을 보여 줍니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
               </p>
               <button type="button" onClick={() => setHelp(false)}>
                 닫기

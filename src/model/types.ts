@@ -6,6 +6,7 @@ export type Unit = 'mm' | 'cm' | 'm' | 'in' | 'ft';
 
 export type Tool =
   | 'navigate'
+  | 'walk'
   | 'select'
   | 'line'
   | 'rect'

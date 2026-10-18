@@ -5,7 +5,6 @@ import {
   AxesHelper,
   BufferGeometry,
   Color,
-  DoubleSide,
   Float32BufferAttribute,
   GridHelper,
   Group,
@@ -17,7 +16,6 @@ import {
   Object3D,
   OrthographicCamera,
   PerspectiveCamera,
-  PlaneGeometry,
   Plane as ThreePlane,
   SphereGeometry,
   Vector4,
@@ -111,6 +109,8 @@ function formatDelta(delta: Vec3, unit: Unit): string {
   return `Δx ${formatLength(delta[0], unit)} · Δy ${formatLength(delta[1], unit)} · Δz ${formatLength(delta[2], unit)}`;
 }
 
+const WALK_SPEED = 150;
+
 interface PickData {
   pick?: boolean;
   faceId?: string;
@@ -192,6 +192,7 @@ export function Viewport(props: ViewportProps) {
   const [sectionOn, setSectionOn] = useState(false);
   const [sectionAxis, setSectionAxis] = useState<SectionCut['axis']>('z');
   const [sectionT, setSectionT] = useState(0.68);
+  const [eyeInches, setEyeInches] = useState(63);
   const bounds = useMemo(() => modelBounds(props.doc), [props.doc]);
   const section = sectionOn ? { axis: sectionAxis, t: sectionT } : null;
   const cutInches = bounds
@@ -216,7 +217,7 @@ export function Viewport(props: ViewportProps) {
         <hemisphereLight args={['#f5f9fc', '#eadfce', 0.78]} position={[0, 0, 200]} />
         <directionalLight position={[220, -280, 360]} intensity={1.2} />
         <ambientLight intensity={0.22} />
-        <EditorScene {...props} planSlot={planSlot} section={section} />
+        <EditorScene {...props} planSlot={planSlot} section={section} eyeInches={eyeInches} />
       </Canvas>
       <div className="plan-card">
         <div className="plan-view" ref={planSlot} />
@@ -226,7 +227,7 @@ export function Viewport(props: ViewportProps) {
             <button
               type="button"
               className={sectionOn ? 'on' : ''}
-              title="이 높이보다 위쪽을 숨겨 안쪽을 봅니다"
+              title="이 위치 너머를 숨겨 안쪽을 봅니다"
               onClick={() => setSectionOn((value) => !value)}
             >
               단면
@@ -253,13 +254,27 @@ export function Viewport(props: ViewportProps) {
               </label>
             </>
           )}
+          {props.tool === 'walk' && (
+            <label>
+              눈높이 {formatLength(eyeInches, props.unit)}
+              <input
+                type="range"
+                min={24}
+                max={120}
+                step={0.5}
+                value={eyeInches}
+                aria-label="눈높이"
+                onChange={(event) => setEyeInches(Number(event.target.value))}
+              />
+            </label>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement | null>; section: SectionCut | null }) {
+function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement | null>; section: SectionCut | null; eyeInches: number }) {
   const { camera, gl, scene } = useThree();
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -267,6 +282,17 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
   const [rubber, setRubber] = useState<Vec3[] | null>(null);
   const [measureLock, setMeasureLock] = useState<{ a: Vec3; b: Vec3 } | null>(null);
   const measureLockRef = useRef<{ a: Vec3; b: Vec3 } | null>(null);
+  const walkKeys = useRef({ f: false, b: false, l: false, r: false, fast: false });
+  const walkLook = useRef<{ x: number; y: number } | null>(null);
+  const walkYaw = useRef(0);
+  const walkPitch = useRef(-0.08);
+  const eyeApplied = useRef(props.eyeInches);
+  const walkApi = useRef({
+    begin: () => {},
+    look: (_dx: number, _dy: number) => {},
+    step: (_dx: number, _dy: number, _dz: number) => {},
+    basis: () => ({ fx: 0, fy: 1, fz: 0, lx: 1, ly: 0 }),
+  });
   const [hover, setHover] = useState<PickData | null>(null);
   const previewRef = useRef<SketchDocument | null>(null);
   previewRef.current = preview;
@@ -310,17 +336,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     return marker;
   }, []);
   const clipPlane = useMemo(() => new ThreePlane(new Vector3(0, 0, -1), 0), []);
-  const sectionSheet = useMemo(() => {
-    const mesh = new Mesh(
-      new PlaneGeometry(1, 1),
-      new MeshBasicMaterial({ color: 0xd4533c, transparent: true, opacity: 0.16, side: DoubleSide, depthWrite: false }),
-    );
-    mesh.raycast = () => {};
-    mesh.layers.set(1);
-    mesh.renderOrder = 3;
-    mesh.visible = false;
-    return mesh;
-  }, []);
+  const walkRay = useMemo(() => new Raycaster(), []);
   const gizmoDrag = useRef<{ start: Matrix4; ghost: Group; hidden: Object3D[] } | null>(null);
   const measureRef = useRef('');
   const shown = preview ?? props.doc;
@@ -358,7 +374,6 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     const bounds = modelBounds(props.doc);
     if (!props.section || !bounds) {
       gl.clippingPlanes = [];
-      sectionSheet.visible = false;
       return;
     }
     const axis = props.section.axis === 'x' ? 0 : props.section.axis === 'y' ? 1 : 2;
@@ -368,24 +383,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     clipPlane.normal.set(0, 0, 0).setComponent(axis, -1);
     clipPlane.constant = cut;
     gl.clippingPlanes = [clipPlane];
-    const center = new Vector3(...bounds.center);
-    const size = new Vector3(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]);
-    const span = (value: number) => Math.max(value, 1) * 1.08;
-    if (axis === 2) {
-      sectionSheet.rotation.set(0, 0, 0);
-      sectionSheet.scale.set(span(size.x), span(size.y), 1);
-      sectionSheet.position.set(center.x, center.y, cut);
-    } else if (axis === 0) {
-      sectionSheet.rotation.set(0, Math.PI / 2, 0);
-      sectionSheet.scale.set(span(size.z), span(size.y), 1);
-      sectionSheet.position.set(cut, center.y, center.z);
-    } else {
-      sectionSheet.rotation.set(-Math.PI / 2, 0, 0);
-      sectionSheet.scale.set(span(size.x), span(size.z), 1);
-      sectionSheet.position.set(center.x, cut, center.z);
-    }
-    sectionSheet.visible = true;
-  }, [props.section, props.doc, gl, clipPlane, sectionSheet]);
+  }, [props.section, props.doc, gl, clipPlane]);
 
   useEffect(() => {
     const planCam = new OrthographicCamera(-1, 1, 1, -1, 0.1, 100000);
@@ -449,6 +447,13 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       const controls = controlsRef.current;
       if (!controls) return;
       event.preventDefault();
+      if (propsRef.current.tool === 'walk') {
+        const pixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 400 : event.deltaY;
+        const distance = Math.max(-110, Math.min(110, -pixels * 0.28));
+        const { fx, fy, fz } = walkApi.current.basis();
+        walkApi.current.step(fx * distance, fy * distance, fz * distance);
+        return;
+      }
       const cam = camera as PerspectiveCamera;
       const pixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 400 : event.deltaY;
       const factor = Math.pow(1.48, pixels / 100);
@@ -910,6 +915,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
 
     const onDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
+      if (propsRef.current.tool === 'walk') return;
       if (grabOrbit(event)) return;
       const current = propsRef.current;
       const tool = current.tool;
@@ -1086,6 +1092,18 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
         setHover((prev) => (prev ? null : prev));
         return;
       }
+      if (current.tool === 'walk') {
+        snapMarker.visible = false;
+        if (walkLook.current) {
+          const dx = event.clientX - walkLook.current.x;
+          const dy = event.clientY - walkLook.current.y;
+          walkLook.current = { x: event.clientX, y: event.clientY };
+          walkApi.current.look(dx, dy);
+          el.style.cursor = 'grabbing';
+        } else el.style.cursor = 'crosshair';
+        setHover((prev) => (prev ? null : prev));
+        return;
+      }
       if (current.tool === 'measure') {
         const hit = infer(event);
         showSnap(hit);
@@ -1177,6 +1195,11 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     };
 
     const onUp = (event: PointerEvent) => {
+      if (propsRef.current.tool === 'walk') {
+        walkLook.current = null;
+        el.style.cursor = 'crosshair';
+        return;
+      }
       if (propsRef.current.tool === 'navigate') el.style.cursor = 'grab';
       if (orbitDrag.current) {
         orbitDrag.current = null;
@@ -1206,6 +1229,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       if (event.key !== 'Escape') return;
       const target = event.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      if (propsRef.current.tool === 'walk') return;
       if (drawRef.current || previewRef.current || measureLockRef.current) {
         drawRef.current = null;
         setPreview(null);
@@ -1222,6 +1246,11 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
 
     const down = (event: PointerEvent) => {
       if (event.button !== 0) return;
+      if (propsRef.current.tool === 'walk') {
+        walkLook.current = { x: event.clientX, y: event.clientY };
+        el.style.cursor = 'grabbing';
+        return;
+      }
       if (propsRef.current.tool === 'navigate') el.style.cursor = 'grabbing';
       queueMicrotask(() => {
         const gizmo = gizmoRef.current as unknown as { dragging?: boolean; axis?: string | null } | null;
@@ -1231,25 +1260,55 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     };
     const onLeave = () => {
       snapMarker.visible = false;
+      walkLook.current = null;
+    };
+    const onWalkKey = (event: KeyboardEvent) => {
+      if (propsRef.current.tool !== 'walk') return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      const down = event.type === 'keydown';
+      if (event.key === 'Shift') {
+        walkKeys.current.fast = down;
+        return;
+      }
+      const key = event.key.toLowerCase();
+      const slot =
+        key === 'w' || key === 'arrowup' ? 'f'
+        : key === 's' || key === 'arrowdown' ? 'b'
+        : key === 'a' || key === 'arrowleft' ? 'l'
+        : key === 'd' || key === 'arrowright' ? 'r'
+        : null;
+      if (!slot) return;
+      event.preventDefault();
+      walkKeys.current[slot] = down;
     };
     el.addEventListener('pointerdown', down);
     el.addEventListener('pointermove', onMove);
     el.addEventListener('pointerup', onUp);
     el.addEventListener('pointerleave', onLeave);
     window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onWalkKey);
+    window.addEventListener('keyup', onWalkKey);
     return () => {
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
       el.removeEventListener('pointerleave', onLeave);
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onWalkKey);
+      window.removeEventListener('keyup', onWalkKey);
     };
   }, [camera, gl]);
 
   useEffect(() => {
     const el = gl.domElement;
-    el.style.cursor = props.tool === 'navigate' ? 'grab' : props.tool === 'measure' ? 'crosshair' : '';
-    if (props.tool === 'navigate') setHover(null);
+    el.style.cursor = props.tool === 'navigate' ? 'grab' : props.tool === 'walk' || props.tool === 'measure' ? 'crosshair' : '';
+    if (props.tool === 'navigate' || props.tool === 'walk') setHover(null);
+    if (props.tool === 'walk') walkApi.current.begin();
+    else {
+      walkKeys.current = { f: false, b: false, l: false, r: false, fast: false };
+      walkLook.current = null;
+    }
     if (props.tool !== 'measure') {
       measureLockRef.current = null;
       setMeasureLock(null);
@@ -1260,6 +1319,18 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     }
     snapMarker.visible = false;
   }, [props.tool, gl]);
+
+  useEffect(() => {
+    if (props.tool !== 'walk') {
+      eyeApplied.current = props.eyeInches;
+      return;
+    }
+    const delta = props.eyeInches - eyeApplied.current;
+    eyeApplied.current = props.eyeInches;
+    if (Math.abs(delta) < 1e-3) return;
+    camera.position.z += delta;
+    walkApi.current.look(0, 0);
+  }, [props.eyeInches, props.tool, camera]);
 
   const applyNumeric = (text: string) => {
     const current = propsRef.current;
@@ -1444,7 +1515,110 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
     });
     axesRef.current = helper;
   }
-  useFrame(() => {
+  const walkScratch = useMemo(() => ({ origin: new Vector3(), dir: new Vector3(), dest: new Vector3() }), []);
+  {
+    const cam = camera as PerspectiveCamera;
+    const solidHits = (origin: Vector3, direction: Vector3, far: number) => {
+      const root = modelRef.current;
+      if (!root) return [] as Intersection[];
+      root.updateWorldMatrix(true, true);
+      walkRay.set(origin, direction);
+      walkRay.near = 0;
+      walkRay.far = far;
+      return walkRay.intersectObject(root, true).filter((hit) => (hit.object.userData as PickData).pick);
+    };
+    const upward = (hit: Intersection) => {
+      const normal = hit.face?.normal;
+      if (!normal) return false;
+      return normal.clone().transformDirection(hit.object.matrixWorld).z > 0.55;
+    };
+    const lowestFloor = (x: number, y: number) => {
+      const bounds = modelBounds(propsRef.current.doc);
+      const top = (bounds?.max[2] ?? 80) + 48;
+      const bottom = bounds?.min[2] ?? 0;
+      walkScratch.origin.set(x, y, top);
+      walkScratch.dir.set(0, 0, -1);
+      let best: number | null = null;
+      for (const hit of solidHits(walkScratch.origin, walkScratch.dir, top - bottom + 96)) {
+        if (!upward(hit)) continue;
+        if (best === null || hit.point.z < best) best = hit.point.z;
+      }
+      return best ?? bottom;
+    };
+    const applyLook = () => {
+      const pitch = walkPitch.current;
+      const cos = Math.cos(pitch);
+      walkScratch.dir.set(Math.sin(walkYaw.current) * cos, Math.cos(walkYaw.current) * cos, Math.sin(pitch));
+      cam.up.set(0, 0, 1);
+      walkScratch.dest.copy(cam.position).add(walkScratch.dir);
+      cam.lookAt(walkScratch.dest);
+      const controls = controlsRef.current;
+      if (controls) controls.target.copy(cam.position).addScaledVector(walkScratch.dir, 120);
+    };
+    const step = (dx: number, dy: number, dz: number) => {
+      cam.position.x += dx;
+      cam.position.y += dy;
+      cam.position.z += dz;
+      applyLook();
+    };
+    const basis = () => {
+      const pitch = walkPitch.current;
+      const yaw = walkYaw.current;
+      const cos = Math.cos(pitch);
+      return {
+        fx: Math.sin(yaw) * cos,
+        fy: Math.cos(yaw) * cos,
+        fz: Math.sin(pitch),
+        lx: Math.cos(yaw),
+        ly: -Math.sin(yaw),
+      };
+    };
+    walkApi.current = {
+      begin() {
+        const controls = controlsRef.current;
+        const focus = controls ? controls.target : cam.position;
+        const facing = new Vector3();
+        cam.getWorldDirection(facing);
+        walkYaw.current = Math.atan2(facing.x, facing.y);
+        walkPitch.current = -0.08;
+        const eye = propsRef.current.eyeInches;
+        const here = lowestFloor(cam.position.x, cam.position.y) + eye;
+        if (Math.abs(cam.position.z - here) < 48) cam.position.z = here;
+        else cam.position.set(focus.x, focus.y, lowestFloor(focus.x, focus.y) + eye);
+        eyeApplied.current = eye;
+        cam.near = 0.45;
+        cam.far = 250000;
+        cam.updateProjectionMatrix();
+        orbitHandle.visible = false;
+        applyLook();
+      },
+      look(dx, dy) {
+        walkYaw.current -= dx * 0.0042;
+        walkPitch.current = Math.max(-1.15, Math.min(1.15, walkPitch.current - dy * 0.0034));
+        applyLook();
+      },
+      step,
+      basis,
+    };
+  }
+
+  useFrame((_, delta) => {
+    if (props.tool === 'walk') {
+      orbitHandle.visible = false;
+      const keys = walkKeys.current;
+      const speed = (keys.fast ? WALK_SPEED * 2.6 : WALK_SPEED) * Math.min(delta, 0.05);
+      const { fx, fy, fz, lx, ly } = walkApi.current.basis();
+      let mx = 0;
+      let my = 0;
+      let mz = 0;
+      if (keys.f) { mx += fx; my += fy; mz += fz; }
+      if (keys.b) { mx -= fx; my -= fy; mz -= fz; }
+      if (keys.l) { mx -= lx; my -= ly; }
+      if (keys.r) { mx += lx; my += ly; }
+      const mag = Math.hypot(mx, my, mz);
+      if (mag > 0) walkApi.current.step((mx / mag) * speed, (my / mag) * speed, (mz / mag) * speed);
+      else walkApi.current.step(0, 0, 0);
+    } else orbitHandle.visible = true;
     const controls = controlsRef.current;
     if (!controls) return;
     orbitHandle.position.copy(controls.target);
@@ -1467,7 +1641,6 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       <primitive object={axesRef.current} />
       <primitive object={orbitHandle} />
       <primitive object={snapMarker} />
-      <primitive object={sectionSheet} />
       <primitive ref={modelRef} object={built.group} />
       <primitive object={pivot} />
       {measureLock && <Line points={[measureLock.a, measureLock.b]} color="#1565c0" lineWidth={2} depthTest={false} />}
@@ -1477,6 +1650,7 @@ function EditorScene(props: ViewportProps & { planSlot: RefObject<HTMLDivElement
       <OrbitControls
         ref={controlsRef}
         makeDefault
+        enabled={props.tool !== 'walk'}
         enableDamping={false}
         enableZoom={false}
         screenSpacePanning

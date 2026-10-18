@@ -9,6 +9,16 @@ function Svg(props: SVGProps<SVGSVGElement> & { children: ReactNode }) {
   );
 }
 
+export function IconWalk() {
+  return (
+    <Svg>
+      <circle cx="12" cy="5.1" r="1.7" />
+      <path d="M12 8.1v5.3" />
+      <path d="M8.3 10.4h7.4" />
+      <path d="m12 13.4-2.7 5.5M12 13.4l2.9 5.3" />
+    </Svg>
+  );
+}
 export function IconHand() {
   return (
     <Svg>
