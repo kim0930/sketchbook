@@ -1,8 +1,10 @@
+import { BUILTIN } from './builtin.ts';
+
 export interface LibraryEntry {
   id: string;
   name: string;
   thumb: string | null;
-  source: 'polyhaven' | 'khronos';
+  source: 'polyhaven' | 'khronos' | 'builtin';
   credit: string;
   polycount?: number;
   categories: string[];
@@ -12,9 +14,10 @@ export interface LibraryEntry {
   dimensions?: [number, number, number];
 }
 
-export type LibraryCategory = 'furniture' | 'seating' | 'table' | 'plants' | 'props' | 'people';
+export type LibraryCategory = 'builtin' | 'furniture' | 'seating' | 'table' | 'plants' | 'props' | 'people';
 
 export const LIBRARY_CATEGORIES: { id: LibraryCategory; label: string }[] = [
+  { id: 'builtin', label: '기본' },
   { id: 'furniture', label: '가구' },
   { id: 'seating', label: '의자' },
   { id: 'table', label: '테이블' },
@@ -109,10 +112,12 @@ function matchesQuery(entry: LibraryEntry, query: string): boolean {
 
 export function filterCatalog(entries: LibraryEntry[], category: LibraryCategory, query: string): LibraryEntry[] {
   const q = query.trim().toLowerCase();
+  const bundled = BUILTIN.filter((entry) => entry.categories.includes(category) && matchesQuery(entry, q));
+  if (category === 'builtin') return bundled;
   if (category === 'people') {
     const curated = PEOPLE.filter((entry) => matchesQuery(entry, q));
     const figures = entries.filter((entry) => isPersonLike(entry) && matchesQuery(entry, q));
-    return [...curated, ...figures];
+    return [...bundled, ...curated, ...figures];
   }
-  return entries.filter((entry) => entry.categories.includes(category) && matchesQuery(entry, q));
+  return [...bundled, ...entries.filter((entry) => entry.categories.includes(category) && matchesQuery(entry, q))];
 }

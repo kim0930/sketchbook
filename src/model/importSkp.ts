@@ -288,7 +288,9 @@ export function importModel(model: SkpModel, fileName = '모델'): ImportResult 
   }
 
   if (model.pages.length) warnings.push('저장된 장면(씬)은 편집 대상으로 가져오지 않습니다.');
-  if (model.dimensions.length) warnings.push('치수선은 편집 대상으로 가져오지 않습니다.');
+  if (model.dimensions.length || model.root.dimensions.length) {
+    warnings.push('스케치업 치수선 위치는 가져오지 못합니다. 이 앱에서 잰 치수는 같은 브라우저에 남습니다.');
+  }
   const looseNotes = [...model.definitions.values(), model.root].some(
     (def) => def.texts.length || def.sectionPlanes.length || def.constructionLines.length,
   );
@@ -305,6 +307,7 @@ export function importModel(model: SkpModel, fileName = '모델'): ImportResult 
     rootId: root.id,
     defaultMaterialId: defaultMaterial.id,
     defaultLayerId,
+    dimensions: [],
   };
   return { doc, warnings: uniqueWarnings };
 }

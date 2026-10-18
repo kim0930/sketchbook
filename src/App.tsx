@@ -5,6 +5,8 @@ import {
   addMaterial,
   boundsOfPoints,
   definitionLocalPoints,
+  deleteDimension,
+  deleteEdge,
   deleteFace,
   deleteMaterial,
   deletePlacement,
@@ -21,24 +23,33 @@ import {
   updateMaterial,
   usageCount,
   duplicatePlacement,
+  groupFace,
   modelBounds,
+  pasteFaceLoops,
+  pastePlacementCopies,
+  pointsOf,
+  worldStep,
 } from './model/document.ts';
 import { exportSkp } from './model/exportSkp.ts';
 import { toGlb, toObj, toStl } from './model/exportMesh.ts';
 import { importModel } from './model/importSkp.ts';
 import { importLibraryModel } from './model/importGltf.ts';
 import type { ParseMessage } from './parseWorker.ts';
-import { formatArea, formatLength, UNIT_LABEL } from './model/math.ts';
+import { formatArea, formatLength, transformPoint, UNIT_LABEL } from './model/math.ts';
+import { toggleSelection } from './model/selection.ts';
 import { createEmpty, createStarter } from './model/starter.ts';
-import type { Selection, SketchDocument, Tool, Unit, Vec3 } from './model/types.ts';
+import type { Dimension, Selection, SketchDocument, Tool, Unit, Vec3 } from './model/types.ts';
 import type { LibraryEntry } from './library/catalog.ts';
+import { placeBuiltin } from './library/builtin.ts';
 import {
+  IconArc,
   IconCircle,
   IconErase,
   IconHand,
   IconLine,
   IconMeasure,
   IconMove,
+  IconOffset,
   IconPaint,
   IconPush,
   IconRect,
@@ -55,20 +66,67 @@ import { Viewport } from './viewport/Viewport.tsx';
 const TOOLS: { id: Tool; label: string; key: string; hint: string; icon: ReactNode }[] = [
   { id: 'navigate', label: '탐색', key: 'H', hint: '왼쪽 드래그로 둘러보고, 오른쪽 드래그로 이동합니다. 모델은 선택되지 않습니다.', icon: <IconHand /> },
   { id: 'walk', label: '걷기', key: 'K', hint: '바라보는 방향으로 WASD·방향키가 움직입니다. 벽은 한 번 막히고, 같은 방향키를 빠르게 다시 누르면 통과합니다. Shift는 더 빠릅니다.', icon: <IconWalk /> },
-  { id: 'select', label: '선택', key: 'V', hint: '클릭으로 선택, 더블클릭으로 그룹 안으로 들어갑니다.', icon: <IconSelect /> },
+  { id: 'select', label: '선택', key: 'V', hint: '클릭하면 그룹이나 면이 선택됩니다. Shift+클릭으로 더하고, 드래그하면 영역 안을 고릅니다. Alt+클릭은 선입니다. 더블클릭으로 그룹 안으로 들어갑니다.', icon: <IconSelect /> },
   { id: 'line', label: '선', key: 'L', hint: '점을 이어서 클릭하고, 시작점에 맞추거나 Enter로 면을 닫습니다. 끝점·중간점·선 위에 붙습니다.', icon: <IconLine /> },
   { id: 'rect', label: '사각형', key: 'R', hint: '첫 모서리와 반대 모서리를 찍습니다. 치수는 80, 60 처럼 입력합니다. 끝점·중간점에 붙습니다.', icon: <IconRect /> },
   { id: 'circle', label: '원', key: 'C', hint: '중심을 찍고 반지름을 정합니다. 끝점·중간점·중심에 붙습니다.', icon: <IconCircle /> },
-  { id: 'measure', label: '측정', key: 'T', hint: '두 점을 찍으면 거리와 Δx Δy Δz를 재고, 선 위에서는 길이, 면 위에서는 면적을 보여 줍니다.', icon: <IconMeasure /> },
+  { id: 'arc', label: '호', key: 'A', hint: '중심, 시작, 끝을 찍으면 반시계 방향 부채꼴 면이 생깁니다. 치수는 각도(도)입니다. 단면이 켜져 있으면 절단면에 그려집니다.', icon: <IconArc /> },
+  { id: 'offset', label: '오프셋', key: 'O', hint: '면을 클릭한 뒤 안팎으로 끕니다. 안쪽으로 끌면 테두리와 안쪽 면이 나뉩니다. 치수로 두께를 줄 수 있습니다.', icon: <IconOffset /> },
+  { id: 'measure', label: '측정', key: 'T', hint: '두 점을 찍으면 치수로 남습니다. 선 위에서는 길이, 면 위에서는 면적을 보여 줍니다.', icon: <IconMeasure /> },
   { id: 'pushpull', label: '밀기/끌기', key: 'P', hint: '면을 드래그해 입체로 만들거나 두께를 바꿉니다.', icon: <IconPush /> },
   { id: 'move', label: '이동', key: 'M', hint: '선택한 뒤 축 핸들을 드래그합니다. 치수는 x, y, z.', icon: <IconMove /> },
   { id: 'rotate', label: '회전', key: 'Q', hint: '선택한 물체를 빨간·초록·파란 축으로 회전합니다.', icon: <IconRotate /> },
   { id: 'scale', label: '배율', key: 'S', hint: '선택한 물체의 크기를 바꿉니다.', icon: <IconScale /> },
   { id: 'paint', label: '페인트', key: 'B', hint: '현재 재질을 면이나 그룹에 칠합니다.', icon: <IconPaint /> },
-  { id: 'erase', label: '지우개', key: 'E', hint: '면이나 그룹을 지웁니다.', icon: <IconErase /> },
+  { id: 'erase', label: '지우개', key: 'E', hint: '면, 그룹, 치수를 지웁니다. 선 근처를 클릭하면 그 선과 붙은 면이 지워집니다.', icon: <IconErase /> },
 ];
 
 const UNITS: Unit[] = ['mm', 'cm', 'm', 'in', 'ft'];
+
+type Clip =
+  | { kind: 'face'; definitionId: string; loops: Vec3[][]; materialId: string | null; layerId: string; step: Vec3 }
+  | { kind: 'placement'; placementId: string; path: string[]; step: Vec3 };
+
+function arrayCount(text: string): number | null {
+  const match = text.trim().match(/^(\d+)\s*[x×*]$/i);
+  if (!match) return null;
+  const count = Number(match[1]);
+  if (!Number.isInteger(count) || count < 1 || count > 40) return null;
+  return count;
+}
+
+function dimensionStorageKey(name: string) {
+  return `sketchbook-dims:${name}`;
+}
+
+function isVec3(value: unknown): value is Vec3 {
+  return Array.isArray(value) && value.length === 3 && value.every((item) => typeof item === 'number' && Number.isFinite(item));
+}
+
+function readSavedDimensions(name: string): Dimension[] {
+  try {
+    const raw = localStorage.getItem(dimensionStorageKey(name));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== 'object') return [];
+      const record = item as { id?: unknown; a?: unknown; b?: unknown };
+      if (typeof record.id !== 'string' || !isVec3(record.a) || !isVec3(record.b)) return [];
+      return [{ id: record.id, a: record.a, b: record.b }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedDimensions(name: string, dimensions: Dimension[]) {
+  try {
+    localStorage.setItem(dimensionStorageKey(name), JSON.stringify(dimensions));
+  } catch {
+    /* 저장 공간이 없어도 편집은 계속됩니다. */
+  }
+}
 
 function bytesPart(data: Uint8Array): ArrayBuffer {
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
@@ -154,7 +212,7 @@ export default function App() {
   const [past, setPast] = useState<SketchDocument[]>([]);
   const [future, setFuture] = useState<SketchDocument[]>([]);
   const [tool, setTool] = useState<Tool>('select');
-  const [selection, setSelection] = useState<Selection | null>(null);
+  const [selection, setSelection] = useState<Selection[]>([]);
   const [editingPath, setEditingPath] = useState<string[]>([]);
   const [unit, setUnit] = useState<Unit>('mm');
   const [snap, setSnap] = useState(0);
@@ -180,12 +238,20 @@ export default function App() {
   const skipDefault = useRef(false);
   const docRef = useRef(doc);
   const placeAnchorRef = useRef<Vec3 | null>(null);
+  const dimensionsReady = useRef(false);
+  useEffect(() => {
+    if (!dimensionsReady.current) {
+      dimensionsReady.current = true;
+      return;
+    }
+    writeSavedDimensions(doc.name, doc.dimensions ?? []);
+  }, [doc]);
   const dropSlot = useRef(0);
   const libraryLock = useRef(false);
   docRef.current = doc;
 
   const path = useMemo(() => validPath(doc, editingPath), [doc, editingPath]);
-  const safeSelection = selection && selectionValid(doc, selection) ? selection : null;
+  const safeSelection = useMemo(() => selection.filter((item) => selectionValid(doc, item)), [doc, selection]);
   const activeTool = TOOLS.find((item) => item.id === tool) ?? TOOLS[0];
 
   useEffect(() => {
@@ -193,7 +259,7 @@ export default function App() {
   }, [path, editingPath.length]);
 
   useEffect(() => {
-    if (selection && !selectionValid(doc, selection)) setSelection(null);
+    if (safeSelection.length !== selection.length) setSelection(safeSelection);
   }, [doc, selection]);
 
   const toast = (message: string) => {
@@ -206,7 +272,7 @@ export default function App() {
     setDoc(next);
     setPast([]);
     setFuture([]);
-    setSelection(null);
+    setSelection([]);
     setEditingPath([]);
     setDirty(false);
     setDrawMaterialId(null);
@@ -231,13 +297,14 @@ export default function App() {
         (anchor?.[1] ?? bounds?.center[1] ?? 0) + (Math.floor(slot / 4) % 3) * 56,
         bounds?.min[2] ?? 0,
       ];
-      const placed = await importLibraryModel(docRef.current, entry, origin);
+      const placed =
+        entry.source === 'builtin' ? placeBuiltin(docRef.current, entry.id, origin) : await importLibraryModel(docRef.current, entry, origin);
       if (!placed) {
         toast('이 모델에서 가져올 면이 없습니다');
         return;
       }
       commit(placed.doc);
-      setSelection({ kind: 'placement', placementId: placed.placementId, path: [placed.placementId] });
+      setSelection([{ kind: 'placement', placementId: placed.placementId, path: [placed.placementId] }]);
       toast(`가져왔습니다: ${entry.name}. ${entry.credit}`);
     } catch (error) {
       toast(error instanceof Error ? error.message : '가져오기에 실패했습니다');
@@ -252,6 +319,97 @@ export default function App() {
     setFuture([]);
     setDoc(next);
     setDirty(true);
+  };
+
+  const clipRef = useRef<Clip | null>(null);
+
+  const copySelection = (silent = false) => {
+    const copyable = safeSelection.filter((item) => item.kind === 'face' || item.kind === 'placement');
+    const current = copyable.length === 1 ? copyable[0] : null;
+    if (!current) {
+      if (!silent) toast('복사할 그룹이나 면을 하나만 선택하세요.');
+      return false;
+    }
+    if (current.kind === 'face') {
+      const def = getDef(doc, current.definitionId);
+      const face = def?.faces.find((item) => item.id === current.faceId);
+      if (!def || !face) return false;
+      const loops = [face.outer, ...face.holes].map((loop) => pointsOf(def, loop).map((point) => [point[0], point[1], point[2]] as Vec3));
+      clipRef.current = {
+        kind: 'face',
+        definitionId: def.id,
+        loops,
+        materialId: face.materialId,
+        layerId: face.layerId,
+        step: worldStep(loops[0]),
+      };
+      if (!silent) toast('면을 복사했습니다. Ctrl+V로 붙여넣거나, 치수에 3x 처럼 입력하세요.');
+      return true;
+    }
+    const found = findPlacement(doc, current.placementId);
+    if (!found) return false;
+    const placement = found.parent.placements[found.index];
+    const def = getDef(doc, placement.definitionId);
+    const placed = def
+      ? definitionLocalPoints(doc, def).map((point) => transformPoint(placement.matrix, point))
+      : [[placement.matrix[12], placement.matrix[13], placement.matrix[14]] as Vec3];
+    clipRef.current = { kind: 'placement', placementId: placement.id, path: [...current.path], step: worldStep(placed) };
+    if (!silent) toast('그룹을 복사했습니다. Ctrl+V로 붙여넣거나, 치수에 3x 처럼 입력하세요.');
+    return true;
+  };
+
+  const pasteCopies = (copies: number) => {
+    const clip = clipRef.current;
+    if (!clip || copies < 1) {
+      toast('복사한 면이나 그룹이 없습니다.');
+      return;
+    }
+    if (clip.kind === 'face') {
+      const next = pasteFaceLoops(docRef.current, clip.definitionId, clip.loops, clip.materialId, clip.layerId, copies, clip.step);
+      if (!next) {
+        toast('붙여넣을 위치가 없습니다.');
+        return;
+      }
+      commit(next);
+      toast(copies === 1 ? '면을 붙여넣었습니다.' : `면을 ${copies}개 붙여넣었습니다.`);
+      return;
+    }
+    const placed = pastePlacementCopies(docRef.current, clip.placementId, copies, clip.step);
+    if (!placed) {
+      toast('붙여넣을 그룹이 없습니다.');
+      return;
+    }
+    commit(placed.doc);
+    const id = placed.ids[placed.ids.length - 1];
+    if (id) setSelection([{ kind: 'placement', placementId: id, path: [...clip.path.slice(0, -1), id] }]);
+    toast(copies === 1 ? '그룹을 붙여넣었습니다.' : `그룹을 ${copies}개 붙여넣었습니다.`);
+  };
+
+  const repeatSelection = (copies: number) => {
+    if (!copySelection(true)) {
+      toast('면이나 그룹을 선택한 뒤 배열하세요.');
+      return;
+    }
+    pasteCopies(copies);
+  };
+
+  const makeGroup = () => {
+    const face = safeSelection.length === 1 && safeSelection[0].kind === 'face' ? safeSelection[0] : null;
+    if (!face) {
+      toast('그룹으로 만들 면을 하나만 선택하세요.');
+      return;
+    }
+    const grouped = groupFace(doc, face.definitionId, face.faceId);
+    if (!grouped) return;
+    commit(grouped.doc);
+    setSelection([
+      {
+        kind: 'placement',
+        placementId: grouped.placementId,
+        path: [...face.path, grouped.placementId],
+      },
+    ]);
+    toast('선택한 면을 그룹으로 만들었습니다.');
   };
 
   const undo = () => {
@@ -296,6 +454,8 @@ export default function App() {
         warnings = result.warnings;
       }
       doc = { ...doc, name: filename.replace(/\.skp$/i, '') || '모델' };
+      const saved = readSavedDimensions(doc.name);
+      if (saved.length) doc = { ...doc, dimensions: saved };
       setLoading('화면을 만들고 있습니다');
       await new Promise((resolve) => window.requestAnimationFrame(() => resolve(undefined)));
       if (mode === 'default' && skipDefault.current) return;
@@ -353,6 +513,7 @@ export default function App() {
   const saveSkp = () => {
     try {
       const result = exportSkp(doc);
+      writeSavedDimensions(doc.name, doc.dimensions ?? []);
       download(bytesPart(result.bytes), `${doc.name || '모델'}.skp`, 'application/octet-stream');
       setDirty(false);
       toast(result.warnings[0] ?? 'SketchUp 2013–2020 호환 .skp로 저장했습니다. 최신 SketchUp에서도 열립니다.');
@@ -400,6 +561,16 @@ export default function App() {
         redo();
         return;
       }
+      if (!typing && meta && event.key.toLowerCase() === 'c') {
+        event.preventDefault();
+        copySelection();
+        return;
+      }
+      if (!typing && meta && event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        pasteCopies(1);
+        return;
+      }
       if (typing) return;
       if (toolRef.current === 'walk') {
         const key = event.key.toLowerCase();
@@ -419,14 +590,11 @@ export default function App() {
         return;
       }
       if (event.key === 'Delete' || event.key === 'Backspace') {
-        if (!safeSelection) return;
+        if (!safeSelection.length) return;
         event.preventDefault();
-        const next =
-          safeSelection.kind === 'face'
-            ? deleteFace(doc, safeSelection.definitionId, safeSelection.faceId)
-            : deletePlacement(doc, safeSelection.placementId);
+        const next = deleteMany(doc, safeSelection);
         if (next) {
-          setSelection(null);
+          setSelection([]);
           commit(next);
         }
         return;
@@ -436,8 +604,20 @@ export default function App() {
         return;
       }
       if (event.key === 'Enter') {
+        const copies = arrayCount(typed);
+        if (copies) {
+          event.preventDefault();
+          repeatSelection(copies);
+          setTyped('');
+          return;
+        }
         setNumericRequest({ id: Date.now(), text: typed });
         setTyped('');
+        return;
+      }
+      if (event.key.toLowerCase() === 'g' && safeSelection.length === 1 && safeSelection[0].kind === 'face') {
+        event.preventDefault();
+        makeGroup();
         return;
       }
       if (/^[\d.+\-]$/.test(event.key) || event.key === ',' || event.key.toLowerCase() === 'x') {
@@ -452,6 +632,16 @@ export default function App() {
     // save/undo close over the latest doc via the render that registered this effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc, typed, safeSelection, past, future]);
+
+  useEffect(() => {
+    const onLeave = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onLeave);
+    return () => window.removeEventListener('beforeunload', onLeave);
+  }, [dirty]);
 
   useEffect(() => {
     const onDrop = (event: DragEvent) => {
@@ -638,13 +828,13 @@ export default function App() {
             placeAnchorRef={placeAnchorRef}
             onEscape={() => {
               if (path.length) setEditingPath(path.slice(0, -1));
-              else setSelection(null);
+              else setSelection([]);
             }}
           />
           {help && (
             <div className="help">
               <p>
-                탐색(H)은 선택 없이 둘러봅니다. 걷기(K)는 사람 시점입니다. 벽은 한 번에 막히고, 같은 방향키를 빠르게 다시 누르면 통과합니다. 눈높이를 조절할 수 있습니다. 측정(T)은 두 점의 거리를 재고, 선·면 위에서는 길이와 면적을 보여 줍니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
+                탐색(H)은 선택 없이 둘러봅니다. 선택(V)은 클릭으로 그룹이나 면을 고르고, Shift+클릭이나 드래그로 여러 개를 고릅니다. 걷기(K)는 사람 시점입니다. 벽은 한 번에 막히고, 같은 방향키를 빠르게 다시 누르면 통과합니다. 호(A)는 중심·시작·끝으로 부채꼴을 만듭니다. 측정은 치수로 남고, 단면이 켜져 있으면 그 면에 그립니다. 오프셋(O)은 면을 안팎으로 띄웁니다. Ctrl+C, Ctrl+V로 복사하고 치수에 3x를 입력하면 옆으로 배열합니다. 평면도는 드래그로 옮기고, 클릭하면 그곳을 바라봅니다.
                 <span className="touch-help"> 한 손가락은 고른 도구이고, 두 손가락으로 밀면 화면이 움직이고 벌리면 확대됩니다. 걷기에서는 화면을 끌어 둘러보고 오른쪽 버튼으로 이동합니다.</span>
               </p>
               <button type="button" onClick={() => setHelp(false)}>
@@ -683,6 +873,8 @@ export default function App() {
                 onCommit={commit}
                 onDrawMaterial={setDrawMaterialId}
                 paintId={paintId}
+                onCopy={copySelection}
+                onGroup={makeGroup}
               />
             )}
             {panel === 'material' && (
@@ -713,6 +905,7 @@ export default function App() {
         <span className="tool-hint">
           <b>{activeTool.label}</b> {activeTool.hint}
         </span>
+        {safeSelection.length > 0 && <span className="sel-count">{selectionSummary(safeSelection)}</span>}
         {live && <span className="readout">{live}</span>}
         <label className="measure">
           치수
@@ -723,7 +916,9 @@ export default function App() {
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
-                setNumericRequest({ id: Date.now(), text: typed });
+                const copies = arrayCount(typed);
+                if (copies) repeatSelection(copies);
+                else setNumericRequest({ id: Date.now(), text: typed });
                 setTyped('');
               }
             }}
@@ -801,33 +996,108 @@ function crumbs(doc: SketchDocument, path: string[]) {
   return items;
 }
 
+function deleteMany(doc: SketchDocument, items: Selection[]): SketchDocument | null {
+  let next = doc;
+  let changed = false;
+  for (const item of items) {
+    if (item.kind !== 'placement') continue;
+    const updated = deletePlacement(next, item.placementId);
+    if (updated) {
+      next = updated;
+      changed = true;
+    }
+  }
+  for (const item of items) {
+    const updated =
+      item.kind === 'face'
+        ? deleteFace(next, item.definitionId, item.faceId)
+        : item.kind === 'edge'
+          ? deleteEdge(next, item.definitionId, item.edgeId)
+          : item.kind === 'dimension'
+            ? deleteDimension(next, item.dimensionId)
+            : null;
+    if (updated) {
+      next = updated;
+      changed = true;
+    }
+  }
+  return changed ? next : null;
+}
+
+function selectionSummary(items: Selection[]): string {
+  const counts = { placement: 0, face: 0, edge: 0, dimension: 0 };
+  for (const item of items) counts[item.kind] += 1;
+  const parts = [
+    counts.placement ? `그룹 ${counts.placement}` : '',
+    counts.face ? `면 ${counts.face}` : '',
+    counts.edge ? `선 ${counts.edge}` : '',
+    counts.dimension ? `치수 ${counts.dimension}` : '',
+  ].filter(Boolean);
+  return parts.join(' · ');
+}
+
+function selectionListKey(item: Selection): string {
+  if (item.kind === 'face') return `face:${item.faceId}`;
+  if (item.kind === 'edge') return `edge:${item.edgeId}`;
+  if (item.kind === 'placement') return `placement:${item.placementId}`;
+  return `dimension:${item.dimensionId}`;
+}
+
+function selectionListLabel(doc: SketchDocument, item: Selection): string {
+  if (item.kind === 'face') return '면';
+  if (item.kind === 'edge') return '선';
+  if (item.kind === 'dimension') return '치수';
+  const found = findPlacement(doc, item.placementId);
+  return found?.parent.placements[found.index].name || '그룹';
+}
+
 function InfoPanel({
   doc,
-  selection,
+  selection: items,
   unit,
   paintId,
   onCommit,
   onDrawMaterial,
+  onCopy,
+  onGroup,
 }: {
   doc: SketchDocument;
-  selection: Selection | null;
+  selection: Selection[];
   unit: Unit;
   paintId: string;
   onCommit: (doc: SketchDocument) => void;
   onDrawMaterial: (id: string) => void;
+  onCopy: () => void;
+  onGroup: () => void;
 }) {
+  if (items.length > 1) {
+    return (
+      <div className="stack">
+        <h3>{items.length}개 선택</h3>
+        <ul className="sel-list">
+          {items.map((item) => (
+            <li key={selectionListKey(item)}>{selectionListLabel(doc, item)}</li>
+          ))}
+        </ul>
+        <p className="muted">Shift+클릭으로 빼거나 더합니다. Delete로 선택한 것을 모두 지웁니다.</p>
+      </div>
+    );
+  }
+  const selection = items[0];
   if (!selection) {
     const bounds = boundsOfPoints(definitionLocalPoints(doc, doc.definitions[0]));
     return (
       <div className="stack">
-        <p className="muted">아무것도 선택하지 않았습니다. 빈 칸을 클릭하면 선택이 풀립니다.</p>
+        <p className="muted">아무것도 선택하지 않았습니다. 객체를 클릭하면 파랗게 표시됩니다. Shift+클릭이나 드래그로 여러 개를 고릅니다.</p>
         {bounds && (
           <p>
             모델 크기 {formatLength(bounds.max[0] - bounds.min[0], unit)} × {formatLength(bounds.max[1] - bounds.min[1], unit)} ×{' '}
             {formatLength(bounds.max[2] - bounds.min[2], unit)}
           </p>
         )}
-        <p className="muted">저장 파일은 SketchUp 2013–2020 형식입니다. 최신 SketchUp에서 열 수 있고, 장면·치수·문자는 포함되지 않습니다.</p>
+        <p className="muted">
+          저장 파일은 SketchUp 2013–2020 형식입니다. 이 앱에서 잰 치수는 같은 브라우저에서 그 파일 이름으로 다시 열리면 돌아옵니다.
+        </p>
         <label>
           그릴 재질
           <select value={paintId} onChange={(event) => onDrawMaterial(event.target.value)}>
@@ -873,6 +1143,53 @@ function InfoPanel({
             ))}
           </select>
         </label>
+        <button type="button" onClick={onGroup}>그룹으로 만들기 (G)</button>
+        <button type="button" onClick={() => onCopy()}>복사 (Ctrl+C)</button>
+      </div>
+    );
+  }
+  if (selection.kind === 'edge') {
+    const def = getDef(doc, selection.definitionId);
+    const edge = def?.edges.find((item) => item.id === selection.edgeId);
+    const a = def && edge ? def.vertices[edge.a] : null;
+    const b = def && edge ? def.vertices[edge.b] : null;
+    const span = a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : 0;
+    return (
+      <div className="stack">
+        <h3>선</h3>
+        <p>길이 {formatLength(span, unit)}</p>
+        <p className="muted">Delete로 지우면 이 선에 붙은 면도 함께 지워집니다.</p>
+        <button
+          type="button"
+          onClick={() => {
+            if (!def || !edge) return;
+            const next = deleteEdge(doc, def.id, edge.id);
+            if (next) onCommit(next);
+          }}
+        >
+          선 지우기
+        </button>
+      </div>
+    );
+  }
+  if (selection.kind === 'dimension') {
+    const dimension = (doc.dimensions ?? []).find((item) => item.id === selection.dimensionId);
+    const span = dimension ? Math.hypot(dimension.b[0] - dimension.a[0], dimension.b[1] - dimension.a[1], dimension.b[2] - dimension.a[2]) : 0;
+    return (
+      <div className="stack">
+        <h3>치수</h3>
+        <p>길이 {formatLength(span, unit)}</p>
+        <p className="muted">Delete로 지웁니다. 저장한 뒤 같은 브라우저에서 이 파일을 다시 열면 치수가 돌아옵니다.</p>
+        <button
+          type="button"
+          onClick={() => {
+            if (!dimension) return;
+            const next = deleteDimension(doc, dimension.id);
+            if (next) onCommit(next);
+          }}
+        >
+          치수 지우기
+        </button>
       </div>
     );
   }
@@ -915,6 +1232,7 @@ function InfoPanel({
           이 배치만 고유하게
         </button>
       )}
+      <button type="button" onClick={() => onCopy()}>복사 (Ctrl+C)</button>
     </div>
   );
 }
@@ -1040,8 +1358,8 @@ function TreePanel({
   onCommit,
 }: {
   doc: SketchDocument;
-  selection: Selection | null;
-  onSelect: (selection: Selection | null) => void;
+  selection: Selection[];
+  onSelect: (selection: Selection[]) => void;
   onEnter: (path: string[]) => void;
   onCommit: (doc: SketchDocument) => void;
 }) {
@@ -1088,8 +1406,8 @@ function TreeNodes({
   def: SketchDocument['definitions'][number];
   path: string[];
   depth: number;
-  selection: Selection | null;
-  onSelect: (selection: Selection | null) => void;
+  selection: Selection[];
+  onSelect: (selection: Selection[]) => void;
   onEnter: (path: string[]) => void;
 }) {
   return (
@@ -1097,14 +1415,15 @@ function TreeNodes({
       {def.placements.map((placement) => {
         const child = getDef(doc, placement.definitionId);
         const next = [...path, placement.id];
-        const active = selection?.kind === 'placement' && selection.placementId === placement.id;
+        const item: Selection = { kind: 'placement', placementId: placement.id, path: next };
+        const active = selection.some((entry) => entry.kind === 'placement' && entry.placementId === placement.id);
         return (
           <div key={placement.id}>
             <button
               type="button"
               className={active ? 'tree active' : 'tree'}
               style={{ paddingLeft: 8 + depth * 14 }}
-              onClick={() => onSelect({ kind: 'placement', placementId: placement.id, path: next })}
+              onClick={(event) => onSelect(event.shiftKey ? toggleSelection(selection, item) : [item])}
               onDoubleClick={() => onEnter(next)}
             >
               {placement.name || child?.name || '그룹'}

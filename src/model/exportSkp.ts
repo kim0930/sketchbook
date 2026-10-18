@@ -241,6 +241,20 @@ export function exportSkp(doc: SketchDocument): ExportResult {
     warnings,
   );
 
+  for (const dimension of doc.dimensions ?? []) {
+    const span = Math.hypot(
+      dimension.b[0] - dimension.a[0],
+      dimension.b[1] - dimension.a[1],
+      dimension.b[2] - dimension.a[2],
+    );
+    if (span < 0.05) continue;
+    try {
+      builder.addDimension(dimension.a, dimension.b, 8);
+    } catch {
+      warnings.push('치수선 일부를 SketchUp 파일에 넣지 못했습니다.');
+    }
+  }
+
   return { bytes: builder.toBytes(), warnings: [...new Set(warnings)] };
 }
 

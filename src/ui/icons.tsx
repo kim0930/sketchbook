@@ -59,6 +59,22 @@ export function IconCircle() {
     </Svg>
   );
 }
+export function IconArc() {
+  return (
+    <Svg>
+      <path d="M6.2 16.2a6.2 6.2 0 0 1 11.6 0" />
+      <path d="M12 16.2V9.6" />
+    </Svg>
+  );
+}
+export function IconOffset() {
+  return (
+    <Svg>
+      <rect x="4.2" y="5.2" width="15.6" height="13.6" rx="0.4" />
+      <rect x="7.6" y="8.4" width="8.8" height="7.2" rx="0.3" />
+    </Svg>
+  );
+}
 export function IconPush() {
   return (
     <Svg>

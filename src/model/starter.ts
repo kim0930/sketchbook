@@ -20,6 +20,7 @@ export function createEmpty(name = '제목 없음'): SketchDocument {
     rootId,
     defaultMaterialId: materialId,
     defaultLayerId: layerId,
+    dimensions: [],
   };
 }
 

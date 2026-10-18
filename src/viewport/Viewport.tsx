@@ -1,15 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Canvas, addAfterEffect, useFrame, useThree } from '@react-three/fiber';
-import { Line, OrbitControls, TransformControls } from '@react-three/drei';
+import { Html, Line, OrbitControls, TransformControls } from '@react-three/drei';
 import {
   AxesHelper,
   BufferGeometry,
   ConeGeometry,
+  CylinderGeometry,
+  EdgesGeometry,
   Color,
   Float32BufferAttribute,
   GridHelper,
   Group,
   Matrix4,
+  LineBasicMaterial,
+  LineSegments,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
@@ -17,6 +21,7 @@ import {
   Object3D,
   OrthographicCamera,
   PerspectiveCamera,
+  type Camera,
   Plane as ThreePlane,
   SphereGeometry,
   TOUCH,
@@ -30,15 +35,22 @@ import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { TransformControls as TransformControlsImpl } from 'three-stdlib';
 import {
   addCircle,
+  addDimension,
   addPolygon,
+  deleteDimension,
   deleteFace,
   deletePlacement,
+  deleteEdge,
+  sectorPoints,
   editingDefinition,
   faceArea,
   faceCentroid,
   getDef,
   groundPlane,
+  insetDistance,
   modelBounds,
+  offsetFace,
+  offsetLoop,
   paintFace,
   paintPlacement,
   pointsOf,
@@ -51,6 +63,7 @@ import {
   worldMatrixOfPath,
 } from '../model/document.ts';
 import { boundsOfPoints, definitionLocalPoints, findPlacement } from '../model/document.ts';
+import { mergeSelection, selectionKey, toggleSelection } from '../model/selection.ts';
 import {
   add,
   centroid,
@@ -65,6 +78,7 @@ import {
   multiplyMat,
   normalize,
   parseMeasures,
+  planeBasis,
   planeFromPoints,
   rayPlane,
   scale,
@@ -78,7 +92,7 @@ import { buildModel, disposeModel } from '../scene/buildScene.ts';
 export interface ViewportProps {
   doc: SketchDocument;
   tool: Tool;
-  selection: Selection | null;
+  selection: Selection[];
   editingPath: string[];
   drawMaterialId: string | null;
   activeLayerId: string;
@@ -87,7 +101,7 @@ export interface ViewportProps {
   viewToken: number;
   viewCommand: { id: number; type: 'fit' | 'pivot' | 'iso' | 'top' | 'front' | 'right' } | null;
   numericRequest: { id: number; text: string } | null;
-  onSelect: (selection: Selection | null) => void;
+  onSelect: (selection: Selection[]) => void;
   onEditingPath: (path: string[]) => void;
   onCommit: (doc: SketchDocument) => void;
   onLiveMeasure: (text: string) => void;
@@ -97,9 +111,11 @@ export interface ViewportProps {
 
 type Draw =
   | { kind: 'rect' | 'circle'; origin: Vec3; plane: Plane; x: number; y: number; moved: boolean }
+  | { kind: 'arc'; center: Vec3; plane: Plane; start: Vec3 | null }
   | { kind: 'line'; points: Vec3[]; plane: Plane }
   | { kind: 'push'; faceId: string; definitionId: string; path: string[]; anchor: Vec3; normal: Vec3; scale: number; start: number }
-  | { kind: 'measure'; origin: Vec3 };
+  | { kind: 'measure'; origin: Vec3 }
+  | { kind: 'offset'; faceId: string; definitionId: string; distance: number };
 
 const SNAP_LABEL = { endpoint: '끝점', midpoint: '중간점', center: '중심', edge: '선 위' } as const;
 const SNAP_COLOR = { endpoint: 0x2e9d4a, midpoint: 0x1e88e5, center: 0x8e24aa, edge: 0xfb8c00 } as const;
@@ -196,9 +212,18 @@ function clampPlanZoom(value: number) {
   return Math.min(24, Math.max(0.2, value));
 }
 
+const PLAN_ZOOM_HOME = 2;
+
+type PlanPan = { x: number; y: number };
+type PlanMetrics = { halfX: number; halfY: number; width: number; height: number; lookX: number; lookY: number };
+
 export function Viewport(props: ViewportProps) {
   const planSlot = useRef<HTMLDivElement>(null);
-  const planZoom = useRef(1);
+  const planZoom = useRef(PLAN_ZOOM_HOME);
+  const planPan = useRef<PlanPan>({ x: 0, y: 0 });
+  const planMetrics = useRef<PlanMetrics>({ halfX: 1, halfY: 1, width: 1, height: 1, lookX: 0, lookY: 0 });
+  const [planFocus, setPlanFocus] = useState<{ id: number; x: number; y: number } | null>(null);
+  const [planSize, setPlanSize] = useState<{ w: number; h: number } | null>(null);
   const walkHold = useRef<(dir: 'f' | 'b' | 'l' | 'r', down: boolean) => void>(() => {});
   const [sectionOn, setSectionOn] = useState(false);
   const [sectionAxis, setSectionAxis] = useState<SectionCut['axis']>('z');
@@ -209,7 +234,8 @@ export function Viewport(props: ViewportProps) {
   useEffect(() => {
     const walking = props.tool === 'walk';
     if (walking !== wasWalk.current) {
-      planZoom.current = 1;
+      planZoom.current = PLAN_ZOOM_HOME;
+      planPan.current = { x: 0, y: 0 };
       wasWalk.current = walking;
     }
   }, [props.tool]);
@@ -238,19 +264,103 @@ export function Viewport(props: ViewportProps) {
     const onEnd = (event: TouchEvent) => {
       if (event.touches.length < 2) pinch = 0;
     };
+    let pointers = 0;
+    let drag: { id: number; x: number; y: number; startX: number; startY: number; moved: boolean } | null = null;
+    let clickStamp = 0;
+    let focusTimer = 0;
+    const fromButton = (event: Event) => (event.target as Element | null)?.closest('button');
+    const stopDrag = () => {
+      drag = null;
+      el.classList.remove('panning');
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      pointers += 1;
+      if (event.button !== 0 || fromButton(event) || pointers > 1) {
+        stopDrag();
+        return;
+      }
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false };
+      try { el.setPointerCapture(event.pointerId); } catch { /* pointer already released */ }
+      event.preventDefault();
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.id) return;
+      if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4) {
+        drag.moved = true;
+        el.classList.add('panning');
+      }
+      if (!drag.moved) return;
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      const metrics = planMetrics.current;
+      if (metrics.width < 1 || metrics.height < 1) return;
+      planPan.current.x -= dx * ((metrics.halfX * 2) / metrics.width);
+      planPan.current.y += dy * ((metrics.halfY * 2) / metrics.height);
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      pointers = Math.max(0, pointers - 1);
+      const finished = drag?.id === event.pointerId ? drag : null;
+      if (finished) stopDrag();
+      if (!finished || finished.moved) return;
+      const now = performance.now();
+      if (now - clickStamp < 280) {
+        window.clearTimeout(focusTimer);
+        clickStamp = 0;
+        return;
+      }
+      clickStamp = now;
+      const metrics = planMetrics.current;
+      const rect = el.getBoundingClientRect();
+      const nx = (finished.startX - rect.left) / Math.max(rect.width, 1);
+      const ny = (finished.startY - rect.top) / Math.max(rect.height, 1);
+      const x = metrics.lookX + (nx - 0.5) * 2 * metrics.halfX;
+      const y = metrics.lookY + (0.5 - ny) * 2 * metrics.halfY;
+      focusTimer = window.setTimeout(() => {
+        if (clickStamp === now) setPlanFocus({ id: now, x, y });
+      }, 280);
+    };
+    const onDoubleClick = (event: MouseEvent) => {
+      if (fromButton(event)) return;
+      planPan.current = { x: 0, y: 0 };
+    };
     el.addEventListener('wheel', onWheel, { passive: false });
     el.addEventListener('touchstart', onStart, { passive: false });
     el.addEventListener('touchmove', onMove, { passive: false });
     el.addEventListener('touchend', onEnd);
     el.addEventListener('touchcancel', onEnd);
+    el.addEventListener('pointerdown', onPointerDown);
+    el.addEventListener('pointermove', onPointerMove);
+    el.addEventListener('pointerup', onPointerUp);
+    el.addEventListener('pointercancel', onPointerUp);
+    el.addEventListener('dblclick', onDoubleClick);
     return () => {
       el.removeEventListener('wheel', onWheel);
       el.removeEventListener('touchstart', onStart);
       el.removeEventListener('touchmove', onMove);
       el.removeEventListener('touchend', onEnd);
       el.removeEventListener('touchcancel', onEnd);
+      el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('pointermove', onPointerMove);
+      el.removeEventListener('pointerup', onPointerUp);
+      el.removeEventListener('pointercancel', onPointerUp);
+      el.removeEventListener('dblclick', onDoubleClick);
+      el.classList.remove('panning');
+      window.clearTimeout(focusTimer);
     };
   }, []);
+  useEffect(() => {
+    const stage = document.querySelector('.stage');
+    if (!(stage instanceof HTMLElement)) return;
+    if (!planSize) {
+      stage.style.removeProperty('--plan-w');
+      stage.style.removeProperty('--plan-h');
+      return;
+    }
+    stage.style.setProperty('--plan-w', `${planSize.w}px`);
+    stage.style.setProperty('--plan-h', `${planSize.h}px`);
+  }, [planSize]);
   const section = sectionOn ? { axis: sectionAxis, t: sectionT } : null;
   const cutInches = bounds
     ? bounds.min[sectionAxis === 'x' ? 0 : sectionAxis === 'y' ? 1 : 2] +
@@ -275,10 +385,37 @@ export function Viewport(props: ViewportProps) {
         <hemisphereLight args={['#f5f9fc', '#eadfce', 0.78]} position={[0, 0, 200]} />
         <directionalLight position={[220, -280, 360]} intensity={1.2} />
         <ambientLight intensity={0.22} />
-        <EditorScene {...props} planSlot={planSlot} planZoom={planZoom} section={section} eyeInches={eyeInches} walkHold={walkHold} />
+        <EditorScene {...props} planSlot={planSlot} planZoom={planZoom} planPan={planPan} planMetrics={planMetrics} planFocus={planFocus} section={section} eyeInches={eyeInches} walkHold={walkHold} />
       </Canvas>
       <div className="plan-card">
-        <div className="plan-view" ref={planSlot}>
+        <div className="plan-view" ref={planSlot} role="application" aria-label="평면도" title="드래그하여 이동 · 클릭하면 그곳을 봅니다 · 두 번 클릭하면 가운데로">
+          <button
+            type="button"
+            className="plan-resize"
+            aria-label="평면도 크기"
+            title="끌어서 크기 조절"
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              const card = event.currentTarget.parentElement;
+              const start = card?.getBoundingClientRect();
+              if (!start) return;
+              const originX = event.clientX;
+              const originY = event.clientY;
+              const move = (next: PointerEvent) => {
+                setPlanSize({
+                  w: Math.min(520, Math.max(140, start.width + next.clientX - originX)),
+                  h: Math.min(420, Math.max(96, start.height + next.clientY - originY)),
+                });
+              };
+              const up = () => {
+                window.removeEventListener('pointermove', move);
+                window.removeEventListener('pointerup', up);
+              };
+              window.addEventListener('pointermove', move);
+              window.addEventListener('pointerup', up);
+            }}
+          />
           <div className="plan-zoom">
             <button type="button" aria-label="평면도 축소" title="축소" onClick={() => { planZoom.current = clampPlanZoom(planZoom.current / 1.35); }}>
               −
@@ -294,7 +431,7 @@ export function Viewport(props: ViewportProps) {
             <button
               type="button"
               className={sectionOn ? 'on' : ''}
-              title="이 위치 너머를 숨겨 안쪽을 봅니다"
+              title="이 위치 너머를 숨깁니다. 선·사각형·원·호는 이 절단면에 그려집니다"
               onClick={() => setSectionOn((value) => !value)}
             >
               단면
@@ -373,6 +510,9 @@ function EditorScene(
   props: ViewportProps & {
     planSlot: RefObject<HTMLDivElement | null>;
     planZoom: RefObject<number>;
+    planPan: RefObject<PlanPan>;
+    planMetrics: RefObject<PlanMetrics>;
+    planFocus: { id: number; x: number; y: number } | null;
     section: SectionCut | null;
     eyeInches: number;
     walkHold: RefObject<(dir: 'f' | 'b' | 'l' | 'r', down: boolean) => void>;
@@ -454,9 +594,9 @@ function EditorScene(
   const selectedMat = useMemo(
     () =>
       new MeshLambertMaterial({
-        color: 0xc5daff,
-        emissive: 0x2f62d6,
-        emissiveIntensity: 0.45,
+        color: 0xd6e4ff,
+        emissive: 0x1d4ed8,
+        emissiveIntensity: 0.72,
         side: 2,
         polygonOffset: true,
         polygonOffsetFactor: -1,
@@ -464,6 +604,9 @@ function EditorScene(
       }),
     [],
   );
+  const outlineMat = useMemo(() => new LineBasicMaterial({ color: 0x1d4ed8, depthTest: false }), []);
+  const hoverLineMat = useMemo(() => new LineBasicMaterial({ color: 0xd97706, depthTest: false }), []);
+  const edgeMarkMat = useMemo(() => new MeshBasicMaterial({ color: 0x1d4ed8, depthTest: false }), []);
   const hoverMat = useMemo(
     () =>
       new MeshLambertMaterial({
@@ -542,15 +685,18 @@ function EditorScene(
         ? new Vector3(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2])
         : new Vector3(80, 60, 32);
       const zoom = clampPlanZoom(propsRef.current.planZoom.current);
+      const pan = propsRef.current.planPan.current;
       const aspect = width / Math.max(height, 1);
       const walking = propsRef.current.tool === 'walk';
       const mainCam = camera as PerspectiveCamera;
       planCam.up.set(0, 1, 0);
       const fittedHalf = Math.max(size.y * 0.5, size.x * 0.5 / aspect, 4) * 1.12 / zoom;
+      const lookX = (walking ? mainCam.position.x : center.x) + pan.x;
+      const lookY = (walking ? mainCam.position.y : center.y) + pan.y;
       if (walking) {
         const eye = mainCam.position.z;
-        planCam.position.set(mainCam.position.x, mainCam.position.y, eye + 2);
-        planCam.lookAt(mainCam.position.x, mainCam.position.y, eye - 10);
+        planCam.position.set(lookX, lookY, eye + 2);
+        planCam.lookAt(lookX, lookY, eye - 10);
         planCam.near = 0.4;
         const floor = bounds?.min[2] ?? eye - 120;
         planCam.far = Math.max(eye + 2 - floor + 80, 200);
@@ -560,8 +706,8 @@ function EditorScene(
         planCam.left = -fittedHalf * aspect;
       } else {
         const halfY = fittedHalf;
-        planCam.position.set(center.x, center.y, center.z + Math.max(size.z, 1) + 80);
-        planCam.lookAt(center.x, center.y, center.z);
+        planCam.position.set(lookX, lookY, center.z + Math.max(size.z, 1) + 80);
+        planCam.lookAt(lookX, lookY, center.z);
         planCam.near = 0.1;
         planCam.far = Math.max(size.z, 1) * 6 + 500;
         planCam.top = halfY;
@@ -569,12 +715,20 @@ function EditorScene(
         planCam.right = halfY * aspect;
         planCam.left = -halfY * aspect;
       }
+      propsRef.current.planMetrics.current = {
+        halfX: fittedHalf * aspect,
+        halfY: fittedHalf,
+        width,
+        height,
+        lookX,
+        lookY,
+      };
       const controls = controlsRef.current;
       if (controls) lookFlat.copy(controls.target).sub(mainCam.position);
       else mainCam.getWorldDirection(lookFlat);
       if (lookFlat.x * lookFlat.x + lookFlat.y * lookFlat.y < 1e-4) lookFlat.set(mainCam.up.x, mainCam.up.y, 0);
-      const originX = walking ? mainCam.position.x : center.x;
-      const originY = walking ? mainCam.position.y : center.y;
+      const originX = lookX;
+      const originY = lookY;
       const halfX = fittedHalf * aspect;
       const camInside =
         Math.abs(mainCam.position.x - originX) <= halfX && Math.abs(mainCam.position.y - originY) <= fittedHalf;
@@ -815,6 +969,24 @@ function EditorScene(
   }, [props.viewCommand]);
 
   useLayoutEffect(() => {
+    const focus = props.planFocus;
+    if (!focus) return;
+    const cam = camera as PerspectiveCamera;
+    if (propsRef.current.tool === 'walk') {
+      cam.position.x = focus.x;
+      cam.position.y = focus.y;
+      walkApi.current.look(0, 0);
+      return;
+    }
+    const controls = controlsRef.current;
+    const from = controls ? controls.target.clone() : cam.position.clone();
+    const direction = cam.position.clone().sub(from);
+    if (direction.lengthSq() < 1e-6) direction.set(0.78, -1, 0.58);
+    lookAtTarget(new Vector3(focus.x, focus.y, from.z), direction.normalize(), Math.max(direction.length(), 8));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.planFocus]);
+
+  useLayoutEffect(() => {
     if (gizmoDrag.current) return;
     const center = selectionCenter(shown, props.selection);
     if (!center) return;
@@ -825,37 +997,87 @@ function EditorScene(
   }, [shown, props.selection, pivot]);
 
   useLayoutEffect(() => {
-    const overlays: Mesh[] = [];
+    const overlays: Object3D[] = [];
+    const hoverItem = props.tool === 'select' ? objectUnder(hover, props.editingPath) : null;
+    const hoverKey = hoverItem ? selectionKey(hoverItem) : '';
+    const chosen = props.selection.filter((item) => selectionKey(item) !== hoverKey);
+    const interest = hoverItem ? [...chosen, hoverItem] : chosen;
+    const addOutline = (mesh: Mesh, material: LineBasicMaterial) => {
+      const edges = new EdgesGeometry(mesh.geometry, 28);
+      const line = new LineSegments(edges, material);
+      line.raycast = () => {};
+      line.renderOrder = 40;
+      mesh.add(line);
+      overlays.push(line);
+    };
     built.group.traverse((obj) => {
       const data = obj.userData as PickData;
       if (!data.pick || !(obj as Mesh).isMesh) return;
       const mesh = obj as Mesh;
-      const sameDef = (id: string | undefined, path: string[] | undefined) =>
-        id === data.definitionId && samePath(data.path ?? [], path ?? []);
-      const selected = props.selection?.kind === 'face' && sameDef(props.selection.definitionId, props.selection.path);
-      const hovered = !selected && hover != null && sameDef(hover.definitionId, hover.path);
-      if (data.batched) {
-        const faceId = selected && props.selection?.kind === 'face' ? props.selection.faceId : hovered ? hover?.faceId : undefined;
-        if (!faceId) return;
-        const geometry = faceOverlay(mesh, faceId);
-        if (!geometry) return;
-        const overlay = new Mesh(geometry, selected ? selectedMat : hoverMat);
-        overlay.raycast = () => {};
-        mesh.add(overlay);
-        overlays.push(overlay);
+      const path = data.path ?? [];
+      let whole: 'selected' | 'hover' | null = null;
+      const faceHits: { id: string; role: 'selected' | 'hover' }[] = [];
+      for (const item of interest) {
+        const role = props.selection.some((entry) => selectionKey(entry) === selectionKey(item)) ? 'selected' : 'hover';
+        if (item.kind === 'placement' && path.length >= item.path.length && item.path.every((id, index) => path[index] === id)) {
+          if (role === 'selected' || !whole) whole = role;
+        }
+        if (item.kind === 'face' && data.definitionId === item.definitionId && samePath(path, item.path)) {
+          if (!data.batched) {
+            if (data.faceId === item.faceId) faceHits.push({ id: item.faceId, role });
+          } else faceHits.push({ id: item.faceId, role });
+        }
+      }
+      const selectedWhole = whole === 'selected';
+      const selectedFace = faceHits.some((hit) => hit.role === 'selected');
+      if (data.batched && !selectedWhole && !whole) {
+        mesh.material = data.baseMaterial as MeshLambertMaterial;
+        for (const hit of faceHits) {
+          const geometry = faceOverlay(mesh, hit.id);
+          if (!geometry) continue;
+          const overlay = new Mesh(geometry, hit.role === 'selected' ? selectedMat : hoverMat);
+          overlay.raycast = () => {};
+          mesh.add(overlay);
+          overlays.push(overlay);
+          const edges = new EdgesGeometry(geometry, 1);
+          const line = new LineSegments(edges, hit.role === 'selected' ? outlineMat : hoverLineMat);
+          line.raycast = () => {};
+          line.renderOrder = 40;
+          mesh.add(line);
+          overlays.push(line);
+        }
         return;
       }
-      const faceSelected = selected && props.selection?.kind === 'face' && props.selection.faceId === data.faceId;
-      const faceHovered = hovered && hover?.faceId === data.faceId;
-      mesh.material = faceSelected ? selectedMat : faceHovered ? hoverMat : (data.baseMaterial as MeshLambertMaterial);
+      const role = selectedWhole || selectedFace ? 'selected' : whole === 'hover' || faceHits.some((hit) => hit.role === 'hover') ? 'hover' : null;
+      mesh.material = role === 'selected' ? selectedMat : role === 'hover' ? hoverMat : (data.baseMaterial as MeshLambertMaterial);
+      if (role) addOutline(mesh, role === 'selected' ? outlineMat : hoverLineMat);
     });
+    for (const item of props.selection) {
+      if (item.kind !== 'edge') continue;
+      const def = getDef(props.doc, item.definitionId);
+      const edge = def?.edges.find((entry) => entry.id === item.edgeId);
+      if (!def || !edge || !def.vertices[edge.a] || !def.vertices[edge.b]) continue;
+      const matrix = worldMatrixOfPath(props.doc, item.path);
+      const a = transformPoint(matrix, def.vertices[edge.a]);
+      const b = transformPoint(matrix, def.vertices[edge.b]);
+      const span = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+      if (span < 1e-4) continue;
+      const mark = new Mesh(new CylinderGeometry(Math.max(0.35, span * 0.012), Math.max(0.35, span * 0.012), span, 8), edgeMarkMat);
+      mark.position.set((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2);
+      mark.quaternion.setFromUnitVectors(new Vector3(0, 1, 0), new Vector3(b[0] - a[0], b[1] - a[1], b[2] - a[2]).normalize());
+      mark.raycast = () => {};
+      mark.renderOrder = 41;
+      scene.add(mark);
+      overlays.push(mark);
+    }
     return () => {
       for (const overlay of overlays) {
         overlay.removeFromParent();
-        overlay.geometry.dispose();
+        const mesh = overlay as Mesh;
+        if (mesh.geometry && mesh.userData !== edgeMarkMat) mesh.geometry.dispose();
       }
     };
-  }, [built, props.selection, hover, selectedMat, hoverMat]);
+  }, [built, props.selection, props.tool, props.editingPath, hover, selectedMat, hoverMat, outlineMat, hoverLineMat, edgeMarkMat, props.doc, scene]);
 
   useEffect(() => {
     const request = props.numericRequest;
@@ -1047,6 +1269,45 @@ function EditorScene(
       return rayPlane(ray.origin, ray.dir, [0, 0, 0], [0, 0, 1]);
     };
 
+    const edgeNear = (event: PointerEvent, data: PickData) => {
+      if (!data.faceId || !data.definitionId) return null;
+      const def = getDef(propsRef.current.doc, data.definitionId);
+      const face = def?.faces.find((item) => item.id === data.faceId);
+      if (!def || !face) return null;
+      const matrix = worldMatrixOfPath(propsRef.current.doc, data.path ?? []);
+      const rect = el.getBoundingClientRect();
+      const projected = new Vector3();
+      const screenOf = (point: Vec3) => {
+        const world = transformPoint(matrix, point);
+        projected.set(world[0], world[1], world[2]).project(camera);
+        return {
+          x: (projected.x * 0.5 + 0.5) * rect.width + rect.left,
+          y: (-projected.y * 0.5 + 0.5) * rect.height + rect.top,
+        };
+      };
+      let best: { edgeId: string; dist: number } | null = null;
+      for (const loop of [face.outer, ...face.holes]) {
+        for (let i = 0; i < loop.length; i++) {
+          const a = loop[i];
+          const b = loop[(i + 1) % loop.length];
+          const edge = def.edges.find((item) => (item.a === a && item.b === b) || (item.a === b && item.b === a));
+          const va = def.vertices[a];
+          const vb = def.vertices[b];
+          if (!edge || !va || !vb) continue;
+          const sa = screenOf(va);
+          const sb = screenOf(vb);
+          const dx = sb.x - sa.x;
+          const dy = sb.y - sa.y;
+          const len2 = dx * dx + dy * dy;
+          const t = len2 < 1e-6 ? 0 : Math.min(1, Math.max(0, ((event.clientX - sa.x) * dx + (event.clientY - sa.y) * dy) / len2));
+          const dist = Math.hypot(sa.x + dx * t - event.clientX, sa.y + dy * t - event.clientY);
+          if (dist <= 8 && (!best || dist < best.dist)) best = { edgeId: edge.id, dist };
+        }
+      }
+      if (!best) return null;
+      return { definitionId: def.id, edgeId: best.edgeId, path: [...(data.path ?? [])] };
+    };
+
     const areaText = (event: PointerEvent): string | null => {
       const picked = pick(event);
       if (!picked?.data.faceId || !picked.data.definitionId) return null;
@@ -1090,9 +1351,49 @@ function EditorScene(
         }
       }
       const ray = localRay(event, world);
+      const section = sectionDrawingPlane(current.doc, current.editingPath, current.section);
+      if (section) {
+        const faceRaw = rayPlane(ray.origin, ray.dir, plane.origin, plane.normal);
+        const cutRaw = rayPlane(ray.origin, ray.dir, section.plane.origin, section.plane.normal);
+        const faceWorld = faceRaw ? transformPoint(world, faceRaw) : null;
+        const onVisible = faceWorld ? faceWorld[section.axis] <= section.cut + 0.3 : false;
+        const faceDist = faceRaw ? length(sub(faceRaw, ray.origin)) : Infinity;
+        const cutDist = cutRaw ? length(sub(cutRaw, ray.origin)) : Infinity;
+        if (cutRaw && (!faceRaw || !onVisible || cutDist <= faceDist + 0.5)) plane = section.plane;
+      }
       const raw = rayPlane(ray.origin, ray.dir, plane.origin, plane.normal);
       if (!raw) return null;
       return { plane, point: snapPoint(raw, plane, event, world) };
+    };
+
+    const dimensionNear = (event: PointerEvent): string | null => {
+      const dims = propsRef.current.doc.dimensions ?? [];
+      if (!dims.length) return null;
+      const rect = el.getBoundingClientRect();
+      const projected = new Vector3();
+      const forward = camera.getWorldDirection(new Vector3());
+      let best: { id: string; dist: number } | null = null;
+      const screenOfWorld = (point: Vec3) => {
+        const toward = projected.set(point[0] - camera.position.x, point[1] - camera.position.y, point[2] - camera.position.z);
+        if (toward.dot(forward) <= 0) return null;
+        projected.set(point[0], point[1], point[2]).project(camera);
+        return {
+          x: (projected.x * 0.5 + 0.5) * rect.width + rect.left,
+          y: (-projected.y * 0.5 + 0.5) * rect.height + rect.top,
+        };
+      };
+      for (const dimension of dims) {
+        const sa = screenOfWorld(dimension.a);
+        const sb = screenOfWorld(dimension.b);
+        if (!sa || !sb) continue;
+        const dx = sb.x - sa.x;
+        const dy = sb.y - sa.y;
+        const len2 = dx * dx + dy * dy;
+        const t = len2 < 1e-6 ? 0 : Math.min(1, Math.max(0, ((event.clientX - sa.x) * dx + (event.clientY - sa.y) * dy) / len2));
+        const dist = Math.hypot(sa.x + dx * t - event.clientX, sa.y + dy * t - event.clientY);
+        if (dist <= 10 && (!best || dist < best.dist)) best = { id: dimension.id, dist };
+      }
+      return best?.id ?? null;
     };
 
     const finishShape = (points: Vec3[]) => {
@@ -1129,6 +1430,71 @@ function EditorScene(
       return true;
     };
 
+    let selectDrag: { x: number; y: number; shift: boolean; alt: boolean } | null = null;
+    let lastPick: { t: number; key: string } | null = null;
+    const marqueeEl = document.createElement('div');
+    marqueeEl.className = 'marquee';
+    const showMarquee = (x: number, y: number, w: number, h: number) => {
+      if (!marqueeEl.isConnected) document.body.appendChild(marqueeEl);
+      marqueeEl.style.left = `${x}px`;
+      marqueeEl.style.top = `${y}px`;
+      marqueeEl.style.width = `${w}px`;
+      marqueeEl.style.height = `${h}px`;
+    };
+    const hideMarquee = () => marqueeEl.remove();
+
+    const clickedObject = (event: PointerEvent, alt: boolean): Selection | null => {
+      const picked = pick(event);
+      const dimensionId = dimensionNear(event);
+      if (alt) {
+        const near = picked ? edgeNear(event, picked.data) : null;
+        if (near && hitKind(near.path) === 'face') {
+          return { kind: 'edge', definitionId: near.definitionId, edgeId: near.edgeId, path: near.path };
+        }
+        if (picked?.data.faceId && picked.data.definitionId && hitKind(picked.data.path ?? []) === 'face') {
+          return { kind: 'face', definitionId: picked.data.definitionId, faceId: picked.data.faceId, path: [...(picked.data.path ?? [])] };
+        }
+        return dimensionId ? { kind: 'dimension', dimensionId } : null;
+      }
+      if (!picked) return dimensionId ? { kind: 'dimension', dimensionId } : null;
+      const path = picked.data.path ?? [];
+      const kind = hitKind(path);
+      if (!kind || !picked.data.faceId || !picked.data.definitionId) return dimensionId ? { kind: 'dimension', dimensionId } : null;
+      if (kind === 'face') {
+        return { kind: 'face', definitionId: picked.data.definitionId, faceId: picked.data.faceId, path: [...path] };
+      }
+      const index = propsRef.current.editingPath.length;
+      const placementId = path[index];
+      if (!placementId) return null;
+      return { kind: 'placement', placementId, path: path.slice(0, index + 1) };
+    };
+
+    const objectsInRect = (x0: number, y0: number, x1: number, y1: number): Selection[] => {
+      const current = propsRef.current;
+      const rect = el.getBoundingClientRect();
+      const hits = (points: Vec3[]) => screenBoxOverlaps(points, camera, rect, x0, y0, x1, y1);
+      const def = editingDefinition(current.doc, current.editingPath);
+      const world = worldMatrixOfPath(current.doc, current.editingPath);
+      const items: Selection[] = [];
+      for (const face of def.faces) {
+        if (face.hidden) continue;
+        const points = pointsOf(def, face.outer).map((point) => transformPoint(world, point));
+        if (hits(points)) items.push({ kind: 'face', definitionId: def.id, faceId: face.id, path: [...current.editingPath] });
+      }
+      for (const placement of def.placements) {
+        if (placement.hidden) continue;
+        const child = getDef(current.doc, placement.definitionId);
+        if (!child) continue;
+        const matrix = multiplyMat(world, placement.matrix);
+        const points = definitionLocalPoints(current.doc, child).map((point) => transformPoint(matrix, point));
+        if (hits(points)) items.push({ kind: 'placement', placementId: placement.id, path: [...current.editingPath, placement.id] });
+      }
+      for (const dimension of current.doc.dimensions ?? []) {
+        if (hits([dimension.a, dimension.b])) items.push({ kind: 'dimension', dimensionId: dimension.id });
+      }
+      return items;
+    };
+
     const onDown = (event: PointerEvent) => {
       if (event.button !== 0) return;
       if (propsRef.current.tool === 'walk') return;
@@ -1143,12 +1509,13 @@ function EditorScene(
         if (!worldPoint) return;
         const draw = drawRef.current;
         if (draw?.kind === 'measure') {
-          const locked = { a: draw.origin, b: worldPoint };
-          measureLockRef.current = locked;
-          setMeasureLock(locked);
+          measureLockRef.current = null;
+          setMeasureLock(null);
           drawRef.current = null;
           setRubber(null);
           const delta = sub(worldPoint, draw.origin);
+          const next = addDimension(current.doc, draw.origin, worldPoint);
+          if (next) current.onCommit(next);
           report(`거리 ${formatLength(length(delta), current.unit)} · ${formatDelta(delta, current.unit)}`);
           return;
         }
@@ -1156,6 +1523,46 @@ function EditorScene(
         setMeasureLock(null);
         drawRef.current = { kind: 'measure', origin: worldPoint };
         report(hit ? `${SNAP_LABEL[hit.kind]} · 다음 점을 찍습니다` : '다음 점을 찍습니다');
+        return;
+      }
+      if (tool === 'offset') {
+        const pickedFace = pick(event);
+        const path = pickedFace?.data.path ?? [];
+        if (!pickedFace?.data.faceId || !pickedFace.data.definitionId || hitKind(path) !== 'face') {
+          report('면을 클릭한 뒤 안팎으로 끕니다');
+          return;
+        }
+        drawRef.current = { kind: 'offset', faceId: pickedFace.data.faceId, definitionId: pickedFace.data.definitionId, distance: 0 };
+        current.onSelect([{ kind: 'face', definitionId: pickedFace.data.definitionId, faceId: pickedFace.data.faceId, path }]);
+        report('안쪽으로 끌면 테두리가 생기고, 바깥으로 끌면 면이 넓어집니다');
+        return;
+      }
+      if (tool === 'arc') {
+        const picked = choosePlane(event);
+        if (!picked) return;
+        const draw = drawRef.current;
+        const world = worldMatrixOfPath(current.doc, current.editingPath);
+        const ray = localRay(event, world);
+        if (!draw || draw.kind !== 'arc') {
+          drawRef.current = { kind: 'arc', center: picked.point, plane: picked.plane, start: null };
+          report('시작점을 찍으면 반지름이 정해집니다');
+          return;
+        }
+        const raw = rayPlane(ray.origin, ray.dir, draw.plane.origin, draw.plane.normal);
+        const point = snapPoint(raw ?? picked.point, draw.plane, event, world);
+        if (!draw.start) {
+          if (length(sub(point, draw.center)) < 0.05) return;
+          drawRef.current = { ...draw, start: point };
+          report('끝점을 찍으면 반시계 방향 부채꼴이 생깁니다. 치수는 각도(도)입니다');
+          return;
+        }
+        const loop = sectorPoints(draw.center, draw.plane, draw.start, point);
+        const def = editingDefinition(current.doc, current.editingPath);
+        const next = loop ? addPolygon(current.doc, def.id, loop, current.drawMaterialId, current.activeLayerId) : null;
+        if (next) current.onCommit(next);
+        drawRef.current = null;
+        setRubber(null);
+        report('');
         return;
       }
       if (tool === 'rect' || tool === 'circle' || tool === 'line') {
@@ -1188,36 +1595,43 @@ function EditorScene(
         drawRef.current = { kind: tool, origin: picked.point, plane: picked.plane, x: event.clientX, y: event.clientY, moved: false };
         return;
       }
-      const picked = pick(event);
-      if (!picked) {
-        if (tool === 'select') current.onSelect(null);
+      if (tool === 'select') {
+        selectDrag = { x: event.clientX, y: event.clientY, shift: event.shiftKey, alt: event.altKey };
         return;
       }
+      if (tool === 'erase') {
+        const dimensionId = dimensionNear(event);
+        if (dimensionId) {
+          const next = deleteDimension(current.doc, dimensionId);
+          if (next) {
+            current.onSelect([]);
+            current.onCommit(next);
+          }
+          return;
+        }
+      }
+      const picked = pick(event);
+      const nearEdge = picked ? edgeNear(event, picked.data) : null;
+      if (nearEdge && hitKind(nearEdge.path) === 'face' && tool === 'erase') {
+        const next = deleteEdge(current.doc, nearEdge.definitionId, nearEdge.edgeId);
+        if (next) {
+          current.onSelect([]);
+          current.onCommit(next);
+        }
+        return;
+      }
+      if (!picked) return;
       const { hit, data } = picked;
       const path = data.path ?? [];
       const kind = hitKind(path);
-      if (!kind || !data.faceId || !data.definitionId) {
-        if (tool === 'select') current.onSelect(null);
-        return;
-      }
-      const now = performance.now();
-      const key = `${path.join('/')}:${data.faceId}`;
-      const last = (onDown as { last?: { t: number; key: string } }).last;
-      const double = Boolean(last && now - last.t < 320 && last.key === key);
-      (onDown as { last?: { t: number; key: string } }).last = { t: now, key };
-      if (tool === 'select' && double && kind === 'group') {
-        const index = current.editingPath.length === 0 ? 0 : current.editingPath.length;
-        current.onEditingPath(path.slice(0, index + 1));
-        current.onSelect(null);
-        return;
-      }
-      if (tool === 'select' || tool === 'move' || tool === 'rotate' || tool === 'scale') {
+      if (!kind || !data.faceId || !data.definitionId) return;
+      if (tool === 'move' || tool === 'rotate' || tool === 'scale') {
         if (kind === 'face') {
-          current.onSelect({ kind: 'face', definitionId: data.definitionId, faceId: data.faceId, path: [...path] });
+          current.onSelect([{ kind: 'face', definitionId: data.definitionId, faceId: data.faceId, path: [...path] }]);
         } else {
           const index = current.editingPath.length === 0 ? 0 : current.editingPath.length;
           const placementId = path[index];
-          if (placementId) current.onSelect({ kind: 'placement', placementId, path: path.slice(0, index + 1) });
+          if (placementId) current.onSelect([{ kind: 'placement', placementId, path: path.slice(0, index + 1) }]);
         }
         return;
       }
@@ -1235,7 +1649,7 @@ function EditorScene(
             ? deleteFace(current.doc, data.definitionId, data.faceId)
             : deletePlacement(current.doc, path[current.editingPath.length === 0 ? 0 : current.editingPath.length]);
         if (next) {
-          current.onSelect(null);
+          current.onSelect([]);
           current.onCommit(next);
         }
         return;
@@ -1298,6 +1712,15 @@ function EditorScene(
 
     const onMove = (event: PointerEvent) => {
       if (pointers.size > 1) return;
+      if (selectDrag && propsRef.current.tool === 'select') {
+        const dx = event.clientX - selectDrag.x;
+        const dy = event.clientY - selectDrag.y;
+        if (Math.hypot(dx, dy) > 5) {
+          showMarquee(Math.min(selectDrag.x, event.clientX), Math.min(selectDrag.y, event.clientY), Math.abs(dx), Math.abs(dy));
+          el.style.cursor = 'crosshair';
+        }
+        return;
+      }
       if (moveOrbit(event)) {
         el.style.cursor = 'grabbing';
         return;
@@ -1352,6 +1775,45 @@ function EditorScene(
         return;
       }
       const draw = drawRef.current;
+      if (draw?.kind === 'offset') {
+        const def = getDef(current.doc, draw.definitionId);
+        const face = def?.faces.find((item) => item.id === draw.faceId);
+        const outer = def && face ? pointsOf(def, face.outer) : null;
+        const plane = outer ? planeFromPoints(outer) : null;
+        if (!def || !face || !outer || !plane) return;
+        const world = worldMatrixOfPath(current.doc, current.editingPath);
+        const ray = localRay(event, world);
+        const raw = rayPlane(ray.origin, ray.dir, plane.origin, plane.normal);
+        if (!raw) return;
+        const distance = insetDistance(outer, raw);
+        if (distance === null) return;
+        draw.distance = distance;
+        const shifted = offsetLoop(outer, distance);
+        if (shifted) setRubber(toWorld(current, [...shifted, shifted[0]]));
+        report(`${distance >= 0 ? '안쪽' : '바깥'} ${formatLength(Math.abs(distance), current.unit)}`);
+        return;
+      }
+      if (draw?.kind === 'arc') {
+        const world = worldMatrixOfPath(current.doc, current.editingPath);
+        const ray = localRay(event, world);
+        const raw = rayPlane(ray.origin, ray.dir, draw.plane.origin, draw.plane.normal);
+        if (!raw) return;
+        const point = snapPoint(raw, draw.plane, event, world);
+        if (!draw.start) {
+          const radius = length(sub(point, draw.center));
+          setRubber(toWorld(current, circleRing(draw.center, draw.plane, radius)));
+          report(tagged(`반지름 ${formatLength(radius, current.unit)}`));
+          return;
+        }
+        const loop = sectorPoints(draw.center, draw.plane, draw.start, point);
+        if (loop) setRubber(toWorld(current, [...loop, loop[0]]));
+        const startAngle = Math.atan2(dot(sub(draw.start, draw.center), draw.plane.v), dot(sub(draw.start, draw.center), draw.plane.u));
+        const endAngle = Math.atan2(dot(sub(point, draw.center), draw.plane.v), dot(sub(point, draw.center), draw.plane.u));
+        let sweep = endAngle - startAngle;
+        if (sweep <= 1e-3) sweep += Math.PI * 2;
+        report(tagged(`${Math.round((sweep * 180) / Math.PI)}°`));
+        return;
+      }
       if (draw?.kind === 'push') {
         const ray = cast(event);
         const param = closestLineParam(draw.anchor, draw.normal, ray.origin, ray.dir);
@@ -1390,7 +1852,7 @@ function EditorScene(
         }
         return;
       }
-      if (current.tool === 'line' || current.tool === 'rect' || current.tool === 'circle') {
+      if (current.tool === 'line' || current.tool === 'rect' || current.tool === 'circle' || current.tool === 'arc') {
         const hit = infer(event);
         showSnap(hit);
         report(hit ? SNAP_LABEL[hit.kind] : '');
@@ -1425,6 +1887,36 @@ function EditorScene(
         el.style.cursor = propsRef.current.tool === 'navigate' ? 'grab' : '';
         return;
       }
+      if (selectDrag) {
+        const start = selectDrag;
+        selectDrag = null;
+        hideMarquee();
+        const current = propsRef.current;
+        const moved = Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5;
+        if (moved) {
+          const hits = objectsInRect(start.x, start.y, event.clientX, event.clientY);
+          current.onSelect(start.shift ? mergeSelection(current.selection, hits) : hits);
+          return;
+        }
+        const item = clickedObject(event, start.alt);
+        if (!start.shift && !start.alt && item?.kind === 'placement') {
+          const key = selectionKey(item);
+          const now = performance.now();
+          if (lastPick && now - lastPick.t < 320 && lastPick.key === key) {
+            current.onEditingPath(item.path);
+            current.onSelect([]);
+            lastPick = null;
+            return;
+          }
+          lastPick = { t: now, key };
+        } else lastPick = null;
+        if (!item) {
+          if (!start.shift) current.onSelect([]);
+          return;
+        }
+        current.onSelect(start.shift ? toggleSelection(current.selection, item) : [item]);
+        return;
+      }
       const draw = drawRef.current;
       if (!draw) return;
       if (draw.kind === 'push') {
@@ -1432,6 +1924,15 @@ function EditorScene(
         setPreview(null);
         drawRef.current = null;
         report('');
+        if (next) propsRef.current.onCommit(next);
+        return;
+      }
+      if (draw.kind === 'offset') {
+        const distance = draw.distance;
+        drawRef.current = null;
+        setRubber(null);
+        report('');
+        const next = offsetFace(propsRef.current.doc, draw.definitionId, draw.faceId, distance);
         if (next) propsRef.current.onCommit(next);
         return;
       }
@@ -1514,6 +2015,8 @@ function EditorScene(
       pointers.delete(event.pointerId);
       walkLook.current = null;
       if (pointers.size > 0) return;
+      selectDrag = null;
+      hideMarquee();
       drawRef.current = null;
       setPreview(null);
       setRubber(null);
@@ -1527,6 +2030,7 @@ function EditorScene(
     window.addEventListener('keydown', onWalkKey);
     window.addEventListener('keyup', onWalkKey);
     return () => {
+      hideMarquee();
       el.removeEventListener('pointerdown', down);
       el.removeEventListener('pointermove', onMove);
       el.removeEventListener('pointerup', onUp);
@@ -1540,7 +2044,18 @@ function EditorScene(
 
   useEffect(() => {
     const el = gl.domElement;
-    el.style.cursor = props.tool === 'navigate' ? 'grab' : props.tool === 'walk' || props.tool === 'measure' ? 'crosshair' : '';
+    el.style.cursor =
+      props.tool === 'navigate'
+        ? 'grab'
+        : props.tool === 'walk' ||
+            props.tool === 'measure' ||
+            props.tool === 'offset' ||
+            props.tool === 'line' ||
+            props.tool === 'rect' ||
+            props.tool === 'circle' ||
+            props.tool === 'arc'
+          ? 'crosshair'
+          : '';
     if (props.tool === 'navigate' || props.tool === 'walk') setHover(null);
     if (props.tool === 'walk') walkApi.current.begin();
     else {
@@ -1596,6 +2111,31 @@ function EditorScene(
       }
       return;
     }
+    if (current.tool === 'arc' && draw?.kind === 'arc' && draw.start && values?.length) {
+      const sweepDeg = values[0];
+      const radius = length(sub(draw.start, draw.center));
+      if (radius >= 0.05 && Math.abs(sweepDeg) >= 1 && Math.abs(sweepDeg) <= 360) {
+        if (Math.abs(sweepDeg) >= 359) {
+          const next = addCircle(current.doc, def.id, draw.center, draw.plane.normal, radius, current.drawMaterialId, current.activeLayerId);
+          if (next) current.onCommit(next);
+        } else {
+          const startAngle = Math.atan2(dot(sub(draw.start, draw.center), draw.plane.v), dot(sub(draw.start, draw.center), draw.plane.u));
+          const endAngle = startAngle + (Math.abs(sweepDeg) * Math.PI) / 180;
+          const end = add(
+            draw.center,
+            add(scale(draw.plane.u, Math.cos(endAngle) * radius), scale(draw.plane.v, Math.sin(endAngle) * radius)),
+          );
+          let loop = sectorPoints(draw.center, draw.plane, draw.start, end);
+          if (loop && sweepDeg < 0) loop = [loop[0], ...loop.slice(1).reverse()];
+          const next = loop ? addPolygon(current.doc, def.id, loop, current.drawMaterialId, current.activeLayerId) : null;
+          if (next) current.onCommit(next);
+        }
+      }
+      drawRef.current = null;
+      setRubber(null);
+      report('');
+      return;
+    }
     if (!values) return;
     if ((current.tool === 'rect' || current.tool === 'circle') && draw && (draw.kind === 'rect' || draw.kind === 'circle')) {
       if (draw.kind === 'rect') {
@@ -1618,10 +2158,23 @@ function EditorScene(
       report('');
       return;
     }
+    if (current.tool === 'offset' && values.length) {
+      const faceSel = current.selection.find((item) => item.kind === 'face');
+      const faceId = draw?.kind === 'offset' ? draw.faceId : faceSel?.faceId ?? null;
+      const definitionId = draw?.kind === 'offset' ? draw.definitionId : faceSel?.definitionId ?? null;
+      if (!faceId || !definitionId) return;
+      const next = offsetFace(current.doc, definitionId, faceId, values[0]);
+      drawRef.current = null;
+      setRubber(null);
+      setPreview(null);
+      if (next) current.onCommit(next);
+      report('');
+      return;
+    }
     if (current.tool === 'pushpull' && values.length) {
-      const faceId = draw?.kind === 'push' ? draw.faceId : current.selection?.kind === 'face' ? current.selection.faceId : hover?.faceId;
-      const definitionId =
-        draw?.kind === 'push' ? draw.definitionId : current.selection?.kind === 'face' ? current.selection.definitionId : hover?.definitionId;
+      const faceSel = current.selection.find((item) => item.kind === 'face');
+      const faceId = draw?.kind === 'push' ? draw.faceId : faceSel?.faceId ?? hover?.faceId;
+      const definitionId = draw?.kind === 'push' ? draw.definitionId : faceSel?.definitionId ?? hover?.definitionId;
       if (!faceId || !definitionId) return;
       const next = pushPull(current.doc, definitionId, faceId, values[0]);
       setPreview(null);
@@ -1630,53 +2183,63 @@ function EditorScene(
       report('');
       return;
     }
-    if ((current.tool === 'move' || current.tool === 'select') && current.selection) {
+    if ((current.tool === 'move' || current.tool === 'select') && current.selection.length) {
       const dx = values[0] ?? 0;
       const dy = values[1] ?? 0;
       const dz = values[2] ?? 0;
-      if (current.selection.kind === 'face') {
-        const next = translateInDefinition(current.doc, current.selection.definitionId, current.selection.faceId, [dx, dy, dz]);
-        if (next) current.onCommit(next);
-      } else {
-        const found = findPlacement(current.doc, current.selection.placementId);
-        if (!found) return;
-        const matrix = [...found.parent.placements[found.index].matrix];
-        matrix[12] += dx;
-        matrix[13] += dy;
-        matrix[14] += dz;
-        current.onCommit(setPlacementMatrix(current.doc, current.selection.placementId, matrix));
+      let next = current.doc;
+      let changed = false;
+      for (const item of current.selection) {
+        if (item.kind === 'face') {
+          const updated = translateInDefinition(next, item.definitionId, item.faceId, [dx, dy, dz]);
+          if (updated) {
+            next = updated;
+            changed = true;
+          }
+        } else if (item.kind === 'placement') {
+          const found = findPlacement(next, item.placementId);
+          if (!found) continue;
+          const matrix = [...found.parent.placements[found.index].matrix];
+          matrix[12] += dx;
+          matrix[13] += dy;
+          matrix[14] += dz;
+          next = setPlacementMatrix(next, item.placementId, matrix);
+          changed = true;
+        }
       }
+      if (changed) current.onCommit(next);
     }
   };
 
   const beginGizmo = () => {
     const current = propsRef.current;
-    if (!current.selection || !modelRef.current || gizmoDrag.current) return;
+    const movable = current.selection.filter((item) => item.kind === 'face' || item.kind === 'placement');
+    if (!movable.length || !modelRef.current || gizmoDrag.current) return;
     const start = new Matrix4().compose(pivot.position, pivot.quaternion, pivot.scale);
     const ghost = new Group();
     ghost.matrixAutoUpdate = false;
     const hidden: Object3D[] = [];
     modelRef.current.traverse((obj) => {
       const data = obj.userData as PickData;
-      const sel = current.selection;
-      if (!sel) return;
-      if (sel.kind === 'placement') {
-        if (data.placementNode === sel.placementId && samePath(data.path ?? [], sel.path)) hidden.push(obj);
-        return;
+      for (const sel of movable) {
+        if (sel.kind === 'placement') {
+          if (data.placementNode === sel.placementId && samePath(data.path ?? [], sel.path)) hidden.push(obj);
+          continue;
+        }
+        if (data.batched && data.definitionId === sel.definitionId && samePath(data.path ?? [], sel.path)) {
+          const mesh = obj as Mesh;
+          const geometry = faceOverlay(mesh, sel.faceId);
+          if (!geometry) continue;
+          mesh.updateWorldMatrix(true, true);
+          const clone = new Mesh(geometry, mesh.material);
+          clone.matrix.copy(mesh.matrixWorld);
+          clone.matrixAutoUpdate = false;
+          clone.userData.disposeGeometry = true;
+          ghost.add(clone);
+          continue;
+        }
+        if (data.faceId === sel.faceId && data.definitionId === sel.definitionId && samePath(data.path ?? [], sel.path)) hidden.push(obj);
       }
-      if (data.batched && data.definitionId === sel.definitionId && samePath(data.path ?? [], sel.path)) {
-        const mesh = obj as Mesh;
-        const geometry = faceOverlay(mesh, sel.faceId);
-        if (!geometry) return;
-        mesh.updateWorldMatrix(true, true);
-        const clone = new Mesh(geometry, mesh.material);
-        clone.matrix.copy(mesh.matrixWorld);
-        clone.matrixAutoUpdate = false;
-        clone.userData.disposeGeometry = true;
-        ghost.add(clone);
-        return;
-      }
-      if (data.faceId === sel.faceId && data.definitionId === sel.definitionId && samePath(data.path ?? [], sel.path)) hidden.push(obj);
     });
     for (const obj of hidden) {
       obj.updateWorldMatrix(true, true);
@@ -1727,21 +2290,29 @@ function EditorScene(
     const array = delta.toArray();
     if (nearlyIdentity(array)) return;
     const current = propsRef.current;
-    if (!current.selection) return;
-    const next =
-      current.selection.kind === 'face'
-        ? transformFace(
-            current.doc,
-            current.selection.definitionId,
-            current.selection.faceId,
-            array,
-            worldMatrixOfPath(current.doc, current.selection.path),
-          )
-        : transformPlacement(current.doc, current.selection.path, array);
-    if (next) current.onCommit(next);
+    let next = current.doc;
+    let changed = false;
+    for (const item of current.selection) {
+      if (item.kind === 'face') {
+        const updated = transformFace(next, item.definitionId, item.faceId, array, worldMatrixOfPath(next, item.path));
+        if (updated) {
+          next = updated;
+          changed = true;
+        }
+      } else if (item.kind === 'placement') {
+        const updated = transformPlacement(next, item.path, array);
+        if (updated) {
+          next = updated;
+          changed = true;
+        }
+      }
+    }
+    if (changed) current.onCommit(next);
   };
 
-  const showGizmo = (props.tool === 'move' || props.tool === 'rotate' || props.tool === 'scale') && props.selection;
+  const showGizmo =
+    (props.tool === 'move' || props.tool === 'rotate' || props.tool === 'scale') &&
+    props.selection.some((item) => item.kind === 'face' || item.kind === 'placement');
   const gridRef = useRef<GridHelper>(null!);
   if (!gridRef.current) {
     const helper = new GridHelper(2400, 240, 0x8ea0b3, 0xc5d2de);
@@ -1942,6 +2513,22 @@ function EditorScene(
       <primitive object={snapMarker} />
       <primitive ref={modelRef} object={built.group} />
       <primitive object={pivot} />
+      {(props.doc.dimensions ?? []).map((dimension) => {
+        const selected = props.selection.some((item) => item.kind === 'dimension' && item.dimensionId === dimension.id);
+        const mid: Vec3 = [
+          (dimension.a[0] + dimension.b[0]) / 2,
+          (dimension.a[1] + dimension.b[1]) / 2,
+          (dimension.a[2] + dimension.b[2]) / 2,
+        ];
+        return (
+          <group key={dimension.id}>
+            <Line points={[dimension.a, dimension.b]} color={selected ? '#0d47a1' : '#1565c0'} lineWidth={selected ? 3 : 2} depthTest={false} />
+            <Html position={mid} center zIndexRange={[20, 0]} style={{ pointerEvents: 'none' }}>
+              <span className={selected ? 'dim-label on' : 'dim-label'}>{formatLength(length(sub(dimension.b, dimension.a)), props.unit)}</span>
+            </Html>
+          </group>
+        );
+      })}
       {measureLock && <Line points={[measureLock.a, measureLock.b]} color="#1565c0" lineWidth={2} depthTest={false} />}
       {rubber && rubber.length >= 2 && (
         <Line points={rubber} color={props.tool === 'measure' ? '#1565c0' : '#d4533c'} lineWidth={2} depthTest={props.tool === 'measure' ? false : undefined} />
@@ -2013,8 +2600,96 @@ function circleRing(center: Vec3, plane: Plane, radius: number): Vec3[] {
   return points;
 }
 
-function selectionCenter(doc: SketchDocument, selection: Selection | null): Vec3 | null {
-  if (!selection) return null;
+function sectionDrawingPlane(
+  doc: SketchDocument,
+  editingPath: readonly string[],
+  section: SectionCut | null,
+): { plane: Plane; axis: 0 | 1 | 2; cut: number } | null {
+  if (!section) return null;
+  const bounds = modelBounds(doc);
+  if (!bounds) return null;
+  const axis = section.axis === 'x' ? 0 : section.axis === 'y' ? 1 : 2;
+  const min = bounds.min[axis];
+  const max = bounds.max[axis];
+  const span = max - min;
+  const cut = min + section.t * (Math.abs(span) < 1e-4 ? 1 : span);
+  const origin: Vec3 = [bounds.center[0], bounds.center[1], bounds.center[2]];
+  origin[axis] = cut;
+  const normal: Vec3 = [0, 0, 0];
+  normal[axis] = -1;
+  const inverse = invertMat(worldMatrixOfPath(doc, editingPath));
+  const localOrigin = transformPoint(inverse, origin);
+  const localNormal = transformDir(inverse, normal);
+  const basis = planeBasis(localNormal);
+  return { plane: { origin: localOrigin, normal: localNormal, u: basis.u, v: basis.v }, axis, cut };
+}
+
+function objectUnder(data: PickData | null, editingPath: readonly string[]): Selection | null {
+  if (!data?.definitionId || !data.faceId) return null;
+  const path = data.path ?? [];
+  if (path.length < editingPath.length || !editingPath.every((id, index) => path[index] === id)) return null;
+  if (path.length === editingPath.length) {
+    return { kind: 'face', definitionId: data.definitionId, faceId: data.faceId, path: [...path] };
+  }
+  const placementId = path[editingPath.length];
+  if (!placementId) return null;
+  return { kind: 'placement', placementId, path: path.slice(0, editingPath.length + 1) };
+}
+
+function screenBoxOverlaps(points: Vec3[], camera: Camera, rect: DOMRect, x0: number, y0: number, x1: number, y1: number): boolean {
+  if (!points.length) return false;
+  const projected = new Vector3();
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let any = false;
+  for (const point of points) {
+    projected.set(point[0], point[1], point[2]).project(camera);
+    if (projected.z < -1 || projected.z > 1) continue;
+    const x = (projected.x * 0.5 + 0.5) * rect.width + rect.left;
+    const y = (-projected.y * 0.5 + 0.5) * rect.height + rect.top;
+    any = true;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  if (!any) return false;
+  const left = Math.min(x0, x1);
+  const right = Math.max(x0, x1);
+  const top = Math.min(y0, y1);
+  const bottom = Math.max(y0, y1);
+  return maxX >= left && minX <= right && maxY >= top && minY <= bottom;
+}
+
+function selectionCenter(doc: SketchDocument, items: Selection[]): Vec3 | null {
+  const centers = items.map((item) => selectionCenterOne(doc, item)).filter((item): item is Vec3 => item !== null);
+  if (!centers.length) return null;
+  const acc: Vec3 = [0, 0, 0];
+  for (const center of centers) {
+    acc[0] += center[0];
+    acc[1] += center[1];
+    acc[2] += center[2];
+  }
+  return [acc[0] / centers.length, acc[1] / centers.length, acc[2] / centers.length];
+}
+
+function selectionCenterOne(doc: SketchDocument, selection: Selection): Vec3 | null {
+  if (selection.kind === 'dimension') {
+    const dimension = (doc.dimensions ?? []).find((item) => item.id === selection.dimensionId);
+    if (!dimension) return null;
+    return [(dimension.a[0] + dimension.b[0]) / 2, (dimension.a[1] + dimension.b[1]) / 2, (dimension.a[2] + dimension.b[2]) / 2];
+  }
+  if (selection.kind === 'edge') {
+    const def = getDef(doc, selection.definitionId);
+    const edge = def?.edges.find((item) => item.id === selection.edgeId);
+    if (!def || !edge) return null;
+    const a = def.vertices[edge.a];
+    const b = def.vertices[edge.b];
+    if (!a || !b) return null;
+    return transformPoint(worldMatrixOfPath(doc, selection.path), [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]);
+  }
   if (selection.kind === 'face') {
     const def = getDef(doc, selection.definitionId);
     const face = def?.faces.find((item) => item.id === selection.faceId);

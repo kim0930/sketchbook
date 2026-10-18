@@ -11,12 +11,14 @@ export type Tool =
   | 'line'
   | 'rect'
   | 'circle'
+  | 'arc'
   | 'pushpull'
   | 'move'
   | 'rotate'
   | 'scale'
   | 'paint'
   | 'erase'
+  | 'offset'
   | 'measure';
 
 export interface Material {
@@ -82,6 +84,12 @@ export interface Definition {
   placements: Placement[];
 }
 
+export interface Dimension {
+  id: string;
+  a: Vec3;
+  b: Vec3;
+}
+
 export interface SketchDocument {
   name: string;
   sourceVersion: string;
@@ -91,11 +99,15 @@ export interface SketchDocument {
   rootId: string;
   defaultMaterialId: string;
   defaultLayerId: string;
+  /** World-space lengths, in inches. */
+  dimensions: Dimension[];
 }
 
 export type Selection =
   | { kind: 'face'; definitionId: string; faceId: string; path: string[] }
-  | { kind: 'placement'; placementId: string; path: string[] };
+  | { kind: 'edge'; definitionId: string; edgeId: string; path: string[] }
+  | { kind: 'placement'; placementId: string; path: string[] }
+  | { kind: 'dimension'; dimensionId: string };
 
 export interface Plane {
   origin: Vec3;

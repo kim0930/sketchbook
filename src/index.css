@@ -148,6 +148,17 @@ button:disabled { opacity: 0.35; cursor: default; }
 .library-card span { padding: 0 6px 6px; font-size: 11px; line-height: 1.3; }
 .library-card.busy { opacity: 0.55; }
 .library-empty { grid-column: 1 / -1; margin: 0; color: var(--muted); line-height: 1.45; }
+.dim-label {
+  color: #0d47a1;
+  background: rgba(255, 250, 244, 0.92);
+  border: 1px solid #90caf9;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.dim-label.on { border-color: #0d47a1; font-weight: 650; }
 .tools {
   width: 52px;
   background: #1b2429;
@@ -176,7 +187,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   z-index: 3;
   top: 10px;
   left: 10px;
-  width: 190px;
+  width: var(--plan-w, 190px);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -184,17 +195,44 @@ button:disabled { opacity: 0.35; cursor: default; }
 }
 .plan-view {
   position: relative;
-  height: 148px;
+  height: var(--plan-h, 148px);
   border: 1px solid #d5cbbd;
   border-radius: 8px;
   box-shadow: 0 8px 22px rgba(28, 35, 40, 0.16);
   background: rgba(231, 238, 245, 0.2);
   pointer-events: auto;
   touch-action: none;
+  cursor: grab;
+  user-select: none;
+}
+.plan-view.panning {
+  cursor: grabbing;
+}
+.plan-resize {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  cursor: nwse-resize;
+}
+.plan-resize::before {
+  content: '';
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid #6d645a;
+  border-bottom: 2px solid #6d645a;
 }
 .plan-zoom {
   position: absolute;
-  right: 6px;
+  right: 24px;
   bottom: 6px;
   display: flex;
   gap: 4px;
@@ -209,6 +247,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   background: rgba(255, 250, 244, 0.96);
   color: var(--ink);
   line-height: 1;
+  cursor: pointer;
 }
 .plan-tools {
   pointer-events: auto;
@@ -236,7 +275,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   position: absolute;
   z-index: 2;
   top: 10px;
-  left: 210px;
+  left: calc(var(--plan-w, 190px) + 20px);
   display: flex;
   gap: 6px;
   align-items: center;
@@ -361,6 +400,22 @@ button:disabled { opacity: 0.35; cursor: default; }
 .tool-hint { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #3d4a51; }
 .tool-hint b { color: var(--accent); font-weight: 650; }
 .measure { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.sel-count {
+  background: #1d4ed8;
+  color: white;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.sel-list { margin: 0; padding-left: 18px; }
+.marquee {
+  position: fixed;
+  border: 1.5px solid #1d4ed8;
+  background: rgba(29, 78, 216, 0.16);
+  pointer-events: none;
+  z-index: 30;
+}
 .readout {
   max-width: 420px;
   overflow: hidden;
@@ -470,8 +525,8 @@ button:disabled { opacity: 0.35; cursor: default; }
     padding-bottom: env(safe-area-inset-bottom);
   }
 
-  .plan-card { width: 132px; top: 8px; left: 8px; }
-  .plan-view { height: 96px; }
+  .plan-card { width: var(--plan-w, 132px); top: 8px; left: 8px; }
+  .plan-view { height: var(--plan-h, 96px); }
   .banner {
     left: 8px;
     right: 8px;
@@ -547,8 +602,8 @@ button:disabled { opacity: 0.35; cursor: default; }
   .tool-hint { display: none; }
   .status { flex-wrap: nowrap; overflow-x: auto; }
   .views { flex: 0 0 auto; }
-  .plan-card { width: 108px; }
-  .plan-view { height: 72px; }
+  .plan-card { width: var(--plan-w, 108px); }
+  .plan-view { height: var(--plan-h, 72px); }
   .banner { top: 86px; }
   .help { max-height: 72px; overflow: auto; }
   .walk-pad { grid-template-columns: 44px 44px 44px; }

@@ -2,6 +2,8 @@ import { uid } from './ids.ts';
 import {
   add,
   centroid,
+  cross,
+  dot,
   faceNormal,
   identity,
   invertMat,
@@ -13,9 +15,10 @@ import {
   planeBasis,
   polygonArea,
   scale,
+  sub,
   transformPoint,
 } from './math.ts';
-import type { Definition, Face, Plane, RGBA, SketchDocument, Vec3 } from './types.ts';
+import type { Definition, Dimension, Face, Plane, RGBA, SketchDocument, Vec3 } from './types.ts';
 
 export function cloneDoc(doc: SketchDocument): SketchDocument {
   return {
@@ -27,6 +30,7 @@ export function cloneDoc(doc: SketchDocument): SketchDocument {
     })),
     layers: doc.layers.map((l) => ({ ...l, color: [l.color[0], l.color[1], l.color[2]] })),
     definitions: doc.definitions.map(cloneDef),
+    dimensions: (doc.dimensions ?? []).map((item) => ({ id: item.id, a: [...item.a] as Vec3, b: [...item.b] as Vec3 })),
   };
 }
 
@@ -286,6 +290,25 @@ export function addPolygon(
   return id ? next : null;
 }
 
+/** Pie slice from `start` around `center`, sweeping counter-clockwise to the angle of `end`. */
+export function sectorPoints(center: Vec3, plane: Plane, start: Vec3, end: Vec3): Vec3[] | null {
+  const radius = length(sub(start, center));
+  if (radius < 0.05) return null;
+  const startAngle = Math.atan2(dot(sub(start, center), plane.v), dot(sub(start, center), plane.u));
+  const endAngle = Math.atan2(dot(sub(end, center), plane.v), dot(sub(end, center), plane.u));
+  let sweep = endAngle - startAngle;
+  if (sweep <= 1e-3) sweep += Math.PI * 2;
+  if (sweep < 0.05) return null;
+  const steps = Math.max(3, Math.min(48, Math.round(sweep / (Math.PI / 16))));
+  const points: Vec3[] = [center];
+  for (let i = 0; i <= steps; i++) {
+    const angle = startAngle + (sweep * i) / steps;
+    points.push(add(center, add(scale(plane.u, Math.cos(angle) * radius), scale(plane.v, Math.sin(angle) * radius))));
+  }
+  if (polygonArea(points) < 1e-4) return null;
+  return points;
+}
+
 export function addCircle(
   doc: SketchDocument,
   definitionId: string,
@@ -307,6 +330,75 @@ export function addCircle(
   return addPolygon(doc, definitionId, points, materialId, layerId);
 }
 
+export function addDimension(doc: SketchDocument, a: Vec3, b: Vec3): SketchDocument | null {
+  if (length(sub(a, b)) < 0.05) return null;
+  return withDoc(doc, (draft) => {
+    const item: Dimension = { id: uid('dim'), a: [a[0], a[1], a[2]], b: [b[0], b[1], b[2]] };
+    draft.dimensions.push(item);
+  });
+}
+
+export function deleteDimension(doc: SketchDocument, dimensionId: string): SketchDocument | null {
+  if (!(doc.dimensions ?? []).some((item) => item.id === dimensionId)) return null;
+  return withDoc(doc, (draft) => {
+    draft.dimensions = draft.dimensions.filter((item) => item.id !== dimensionId);
+  });
+}
+
+export interface BoxPart {
+  origin: Vec3;
+  size: Vec3;
+  color: RGBA;
+}
+
+export function addBoxAssembly(
+  doc: SketchDocument,
+  name: string,
+  parts: BoxPart[],
+  placeAt: Vec3,
+): { doc: SketchDocument; placementId: string } | null {
+  if (!parts.length) return null;
+  let placementId = '';
+  const next = withDoc(doc, (draft) => {
+    const materials = new Map<string, string>();
+    const materialFor = (color: RGBA) => {
+      const key = color.join(',');
+      const found = materials.get(key);
+      if (found) return found;
+      const id = uid('mat');
+      draft.materials.push({ id, name, color: [color[0], color[1], color[2], color[3]], opacity: color[3] / 255 });
+      materials.set(key, id);
+      return id;
+    };
+    const def: Definition = {
+      id: uid('def'),
+      name,
+      kind: 'definition',
+      vertices: [],
+      faces: [],
+      edges: [],
+      placements: [],
+    };
+    for (const part of parts) {
+      if (part.size[0] <= 0 || part.size[1] <= 0 || part.size[2] <= 0) continue;
+      appendBox(def, part.origin, part.size, materialFor(part.color), draft.defaultLayerId);
+    }
+    if (!def.faces.length) return;
+    draft.definitions.push(def);
+    placementId = uid('inst');
+    getRoot(draft).placements.push({
+      id: placementId,
+      name,
+      definitionId: def.id,
+      matrix: translation(placeAt[0], placeAt[1], placeAt[2]),
+      materialId: null,
+      layerId: draft.defaultLayerId,
+      hidden: false,
+    });
+  });
+  return placementId ? { doc: next, placementId } : null;
+}
+
 export function deleteFace(doc: SketchDocument, definitionId: string, faceId: string): SketchDocument | null {
   let changed = false;
   const next = withDoc(doc, (draft) => {
@@ -319,6 +411,272 @@ export function deleteFace(doc: SketchDocument, definitionId: string, faceId: st
     changed = true;
   });
   return changed ? next : null;
+}
+
+function loopHasEdge(loop: number[], a: number, b: number): boolean {
+  for (let i = 0; i < loop.length; i++) {
+    const u = loop[i];
+    const v = loop[(i + 1) % loop.length];
+    if ((u === a && v === b) || (u === b && v === a)) return true;
+  }
+  return false;
+}
+
+export function deleteEdge(doc: SketchDocument, definitionId: string, edgeId: string): SketchDocument | null {
+  let changed = false;
+  const next = withDoc(doc, (draft) => {
+    const def = getDef(draft, definitionId);
+    const edge = def?.edges.find((item) => item.id === edgeId);
+    if (!def || !edge) return;
+    def.faces = def.faces.filter((face) => {
+      const uses = [face.outer, ...face.holes].some((loop) => loopHasEdge(loop, edge.a, edge.b));
+      return !uses;
+    });
+    pruneEdges(def);
+    changed = true;
+  });
+  return changed ? next : null;
+}
+
+function lineMeet(origin: Vec3, dir: Vec3, otherOrigin: Vec3, otherDir: Vec3): Vec3 | null {
+  const crossed = cross(dir, otherDir);
+  const denom = dot(crossed, crossed);
+  if (denom < 1e-10) return null;
+  const s = dot(cross(sub(otherOrigin, origin), otherDir), crossed) / denom;
+  return add(origin, scale(dir, s));
+}
+
+/** Moves each edge along the face interior. Positive distance shrinks the loop. */
+export function offsetLoop(points: Vec3[], distance: number): Vec3[] | null {
+  if (points.length < 3 || Math.abs(distance) < 1e-4) return null;
+  const normal = faceNormal(points);
+  if (length(normal) < 0.5) return null;
+  const count = points.length;
+  const next: Vec3[] = [];
+  for (let i = 0; i < count; i++) {
+    const prev = points[(i - 1 + count) % count];
+    const curr = points[i];
+    const following = points[(i + 1) % count];
+    const d0 = normalize(sub(curr, prev));
+    const d1 = normalize(sub(following, curr));
+    if (length(d0) < 0.5 || length(d1) < 0.5) return null;
+    const n0 = normalize(cross(normal, d0));
+    const n1 = normalize(cross(normal, d1));
+    const p0 = add(curr, scale(n0, distance));
+    const p1 = add(curr, scale(n1, distance));
+    const hit = lineMeet(p0, d0, p1, d1);
+    const miter = normalize(add(n0, n1));
+    next.push(hit ?? add(curr, scale(length(miter) < 0.5 ? n0 : miter, distance)));
+  }
+  const before = polygonArea(points);
+  const after = polygonArea(next);
+  if (after < 1e-4) return null;
+  if (distance > 0 && after >= before * 0.995) return null;
+  return next;
+}
+
+function pointInLoop(points: Vec3[], point: Vec3, normal: Vec3): boolean {
+  const { u, v } = planeBasis(normal);
+  const origin = points[0];
+  const flat = points.map((p) => {
+    const d = sub(p, origin);
+    return [dot(d, u), dot(d, v)] as const;
+  });
+  const delta = sub(point, origin);
+  const x = dot(delta, u);
+  const y = dot(delta, v);
+  let inside = false;
+  for (let i = 0, j = flat.length - 1; i < flat.length; j = i++) {
+    const [xi, yi] = flat[i];
+    const [xj, yj] = flat[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi + 0) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function segmentDistance(point: Vec3, a: Vec3, b: Vec3): number {
+  const span = sub(b, a);
+  const spanLen = length(span);
+  if (spanLen < 1e-8) return length(sub(point, a));
+  const t = Math.min(1, Math.max(0, dot(sub(point, a), span) / (spanLen * spanLen)));
+  return length(sub(point, add(a, scale(span, t))));
+}
+
+/** Positive when `point` is inside the loop: the distance to the nearest edge. */
+export function insetDistance(points: Vec3[], point: Vec3): number | null {
+  if (points.length < 3) return null;
+  const normal = faceNormal(points);
+  if (length(normal) < 0.5) return null;
+  let nearest = Infinity;
+  for (let i = 0; i < points.length; i++) {
+    nearest = Math.min(nearest, segmentDistance(point, points[i], points[(i + 1) % points.length]));
+  }
+  if (!Number.isFinite(nearest)) return null;
+  return pointInLoop(points, point, normal) ? nearest : -nearest;
+}
+
+export function offsetFace(doc: SketchDocument, definitionId: string, faceId: string, distance: number): SketchDocument | null {
+  if (Math.abs(distance) < 0.05) return null;
+  const sourceDef = getDef(doc, definitionId);
+  const sourceFace = sourceDef?.faces.find((face) => face.id === faceId);
+  if (!sourceDef || !sourceFace || sourceFace.outer.length > 64) return null;
+  const outer = pointsOf(sourceDef, sourceFace.outer);
+  const shifted = offsetLoop(outer, distance);
+  if (!shifted) return null;
+  let changed = false;
+  const next = withDoc(doc, (draft) => {
+    const def = getDef(draft, definitionId);
+    const face = def?.faces.find((item) => item.id === faceId);
+    if (!def || !face) return;
+    const indices = shifted.map((point) => findOrAddVertex(def, point));
+    if (distance > 0) {
+      face.holes = [...face.holes, [...indices].reverse()];
+      linkFace(def, face);
+      const inner: Face = {
+        id: uid('face'),
+        outer: indices,
+        holes: [],
+        materialId: face.materialId,
+        layerId: face.layerId,
+        hidden: false,
+      };
+      def.faces.push(inner);
+      linkFace(def, inner);
+    } else {
+      face.outer = indices;
+      linkFace(def, face);
+      pruneEdges(def);
+    }
+    changed = true;
+  });
+  return changed ? next : null;
+}
+
+export function groupFace(
+  doc: SketchDocument,
+  definitionId: string,
+  faceId: string,
+): { doc: SketchDocument; placementId: string } | null {
+  const parent = getDef(doc, definitionId);
+  const face = parent?.faces.find((item) => item.id === faceId);
+  if (!parent || !face) return null;
+  let placementId = '';
+  const next = withDoc(doc, (draft) => {
+    const def = getDef(draft, definitionId);
+    const source = def?.faces.find((item) => item.id === faceId);
+    if (!def || !source) return;
+    const used = [...new Set([...source.outer, ...source.holes.flat()])];
+    const map = new Map<number, number>();
+    const vertices: Vec3[] = used.map((index, order) => {
+      map.set(index, order);
+      return [def.vertices[index][0], def.vertices[index][1], def.vertices[index][2]];
+    });
+    const remap = (loop: number[]) => loop.map((index) => map.get(index) ?? 0);
+    const childFace: Face = {
+      id: uid('face'),
+      outer: remap(source.outer),
+      holes: source.holes.map(remap),
+      materialId: source.materialId,
+      layerId: source.layerId,
+      hidden: false,
+    };
+    const child: Definition = {
+      id: uid('def'),
+      name: '그룹',
+      kind: 'definition',
+      vertices,
+      faces: [childFace],
+      edges: [],
+      placements: [],
+    };
+    linkFace(child, childFace);
+    draft.definitions.push(child);
+    def.faces = def.faces.filter((item) => item.id !== faceId);
+    pruneEdges(def);
+    placementId = uid('inst');
+    def.placements.push({
+      id: placementId,
+      name: '그룹',
+      definitionId: child.id,
+      matrix: identity(),
+      materialId: null,
+      layerId: source.layerId,
+      hidden: false,
+    });
+  });
+  return placementId ? { doc: next, placementId } : null;
+}
+
+export function worldStep(points: Vec3[]): Vec3 {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  for (const point of points) {
+    minX = Math.min(minX, point[0]);
+    maxX = Math.max(maxX, point[0]);
+  }
+  const span = maxX - minX;
+  return [span > 0.5 ? span : 24, 0, 0];
+}
+
+export function pasteFaceLoops(
+  doc: SketchDocument,
+  definitionId: string,
+  loops: Vec3[][],
+  materialId: string | null,
+  layerId: string,
+  copies: number,
+  step: Vec3,
+): SketchDocument | null {
+  const outer = loops[0];
+  if (!outer || outer.length < 3 || copies < 1) return null;
+  let changed = false;
+  const next = withDoc(doc, (draft) => {
+    const def = getDef(draft, definitionId);
+    if (!def) return;
+    for (let copy = 1; copy <= copies; copy++) {
+      const shift = scale(step, copy);
+      const moved = loops.map((loop) => loop.map((point) => add(point, shift)));
+      if (appendPolygon(def, moved, materialId, layerId)) changed = true;
+    }
+  });
+  return changed ? next : null;
+}
+
+export function pastePlacementCopies(
+  doc: SketchDocument,
+  placementId: string,
+  copies: number,
+  step: Vec3,
+): { doc: SketchDocument; ids: string[] } | null {
+  const found = findPlacement(doc, placementId);
+  if (!found || copies < 1) return null;
+  const source = found.parent.placements[found.index];
+  const ids: string[] = [];
+  const next = withDoc(doc, (draft) => {
+    const loc = findPlacement(draft, placementId);
+    if (!loc) return;
+    const parent = loc.parent;
+    const placement = parent.placements[loc.index];
+    for (let copy = 1; copy <= copies; copy++) {
+      const id = uid('inst');
+      const matrix = [...placement.matrix];
+      const shift = scale(step, copy);
+      matrix[12] += shift[0];
+      matrix[13] += shift[1];
+      matrix[14] += shift[2];
+      parent.placements.push({
+        id,
+        name: source.name,
+        definitionId: source.definitionId,
+        matrix,
+        materialId: source.materialId,
+        layerId: source.layerId,
+        hidden: source.hidden,
+      });
+      ids.push(id);
+    }
+  });
+  return ids.length ? { doc: next, ids } : null;
 }
 
 export function deletePlacement(doc: SketchDocument, placementId: string): SketchDocument | null {
@@ -701,12 +1059,21 @@ export function definitionLocalPoints(doc: SketchDocument, def: Definition, guar
   return points;
 }
 
-export function selectionValid(doc: SketchDocument, selection: { kind: string; definitionId?: string; faceId?: string; placementId?: string } | null): boolean {
+export function selectionValid(
+  doc: SketchDocument,
+  selection: { kind: string; definitionId?: string; faceId?: string; edgeId?: string; placementId?: string; dimensionId?: string } | null,
+): boolean {
   if (!selection) return false;
   if (selection.kind === 'face' && selection.definitionId && selection.faceId) {
     return Boolean(getDef(doc, selection.definitionId)?.faces.some((f) => f.id === selection.faceId));
   }
+  if (selection.kind === 'edge' && selection.definitionId && selection.edgeId) {
+    return Boolean(getDef(doc, selection.definitionId)?.edges.some((edge) => edge.id === selection.edgeId));
+  }
   if (selection.kind === 'placement' && selection.placementId) return Boolean(findPlacement(doc, selection.placementId));
+  if (selection.kind === 'dimension' && selection.dimensionId) {
+    return Boolean((doc.dimensions ?? []).some((item) => item.id === selection.dimensionId));
+  }
   return false;
 }
 

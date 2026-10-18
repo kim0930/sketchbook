@@ -21,7 +21,7 @@ function Thumb({ src, name }: { src: string | null; name: string }) {
 
 export function LibraryPanel({ busyId, onImport, onClose }: LibraryPanelProps) {
   const [query, setQuery] = useState('');
-  const [category, setCategory] = useState<LibraryCategory>('furniture');
+  const [category, setCategory] = useState<LibraryCategory>('builtin');
   const [assets, setAssets] = useState<LibraryEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,7 +32,7 @@ export function LibraryPanel({ busyId, onImport, onClose }: LibraryPanelProps) {
         if (!cancel) setAssets(list);
       })
       .catch(() => {
-        if (!cancel) setError('가구 목록을 불러오지 못했습니다. 사람 모델은 그대로 사용할 수 있습니다.');
+        if (!cancel) setError('가구 목록을 불러오지 못했습니다. 기본 모형은 그대로 사용할 수 있습니다.');
       });
     return () => {
       cancel = true;
@@ -65,12 +65,17 @@ export function LibraryPanel({ busyId, onImport, onClose }: LibraryPanelProps) {
         ))}
       </div>
       <p className="library-note">
-        가구나 소품은 Poly Haven(CC0), 서 있는 사람은 Khronos 샘플(CC BY)입니다. 누르면 지금 보는 위치의 바닥에 놓입니다.
+        기본 모형은 앱 안에 있어 연결 없이도 놓입니다. 나머지 가구나 소품은 Poly Haven(CC0), 사람 샘플은 Khronos(CC BY)입니다.
+        누르면 지금 보는 위치의 바닥에 놓입니다.
       </p>
       <div className="library-grid">
-        {error && category !== 'people' && <p className="library-empty">{error}</p>}
-        {!assets && !error && category !== 'people' && <p className="library-empty">목록을 불러오는 중</p>}
-        {assets && items.length === 0 && <p className="library-empty">해당하는 모델이 없습니다.</p>}
+        {error && items.length === 0 && category !== 'builtin' && <p className="library-empty">{error}</p>}
+        {!assets && !error && items.length === 0 && category !== 'builtin' && category !== 'people' && (
+          <p className="library-empty">목록을 불러오는 중</p>
+        )}
+        {items.length === 0 && (assets || category === 'builtin' || category === 'people') && !error && (
+          <p className="library-empty">해당하는 모델이 없습니다.</p>
+        )}
         {items.map((entry) => (
           <button
             key={entry.id}
