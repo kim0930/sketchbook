@@ -54,7 +54,7 @@ import { Viewport } from './viewport/Viewport.tsx';
 
 const TOOLS: { id: Tool; label: string; key: string; hint: string; icon: ReactNode }[] = [
   { id: 'navigate', label: '탐색', key: 'H', hint: '왼쪽 드래그로 둘러보고, 오른쪽 드래그로 이동합니다. 모델은 선택되지 않습니다.', icon: <IconHand /> },
-  { id: 'walk', label: '걷기', key: 'K', hint: '바라보는 방향으로 WASD·방향키가 움직입니다. 벽은 통과하고, Shift는 더 빠릅니다. 눈높이는 평면도 아래에서 조절합니다.', icon: <IconWalk /> },
+  { id: 'walk', label: '걷기', key: 'K', hint: '바라보는 방향으로 WASD·방향키가 움직입니다. 벽은 한 번 막히고, 같은 방향키를 빠르게 다시 누르면 통과합니다. Shift는 더 빠릅니다.', icon: <IconWalk /> },
   { id: 'select', label: '선택', key: 'V', hint: '클릭으로 선택, 더블클릭으로 그룹 안으로 들어갑니다.', icon: <IconSelect /> },
   { id: 'line', label: '선', key: 'L', hint: '점을 이어서 클릭하고, 시작점에 맞추거나 Enter로 면을 닫습니다. 끝점·중간점·선 위에 붙습니다.', icon: <IconLine /> },
   { id: 'rect', label: '사각형', key: 'R', hint: '첫 모서리와 반대 모서리를 찍습니다. 치수는 80, 60 처럼 입력합니다. 끝점·중간점에 붙습니다.', icon: <IconRect /> },
@@ -644,7 +644,7 @@ export default function App() {
           {help && (
             <div className="help">
               <p>
-                탐색(H)은 선택 없이 둘러봅니다. 걷기(K)는 사람 시점으로 벽을 통과해 움직이고, 눈높이를 조절할 수 있습니다. 측정(T)은 두 점의 거리를 재고, 선·면 위에서는 길이와 면적을 보여 줍니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
+                탐색(H)은 선택 없이 둘러봅니다. 걷기(K)는 사람 시점입니다. 벽은 한 번에 막히고, 같은 방향키를 빠르게 다시 누르면 통과합니다. 눈높이를 조절할 수 있습니다. 측정(T)은 두 점의 거리를 재고, 선·면 위에서는 길이와 면적을 보여 줍니다. 라이브러리에서 가구나 사람을 놓을 수 있습니다.
                 <span className="touch-help"> 한 손가락은 고른 도구이고, 두 손가락으로 밀면 화면이 움직이고 벌리면 확대됩니다. 걷기에서는 화면을 끌어 둘러보고 오른쪽 버튼으로 이동합니다.</span>
               </p>
               <button type="button" onClick={() => setHelp(false)}>

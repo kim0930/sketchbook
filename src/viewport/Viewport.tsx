@@ -4,6 +4,7 @@ import { Line, OrbitControls, TransformControls } from '@react-three/drei';
 import {
   AxesHelper,
   BufferGeometry,
+  ConeGeometry,
   Color,
   Float32BufferAttribute,
   GridHelper,
@@ -110,7 +111,10 @@ function formatDelta(delta: Vec3, unit: Unit): string {
   return `Δx ${formatLength(delta[0], unit)} · Δy ${formatLength(delta[1], unit)} · Δz ${formatLength(delta[2], unit)}`;
 }
 
-const WALK_SPEED = 150;
+const WALK_SPEED = 105;
+const WALK_BODY = 12;
+const WALK_PASS_GAP = 500;
+const WALK_PASS_INCHES = 48;
 
 interface PickData {
   pick?: boolean;
@@ -391,6 +395,13 @@ function EditorScene(
     look: (_dx: number, _dy: number) => {},
     step: (_dx: number, _dy: number, _dz: number) => {},
     basis: () => ({ fx: 0, fy: 1, fz: 0, lx: 1, ly: 0 }),
+    wallDistance: (_dx: number, _dy: number, _reach: number) => null as number | null,
+  });
+  const walkNudge = useRef({
+    prev: { f: false, b: false, l: false, r: false },
+    releasedAt: { f: 0, b: 0, l: 0, r: 0 },
+    passLeft: 0,
+    passed: 0,
   });
   const [hover, setHover] = useState<PickData | null>(null);
   const previewRef = useRef<SketchDocument | null>(null);
@@ -488,14 +499,25 @@ function EditorScene(
     const planCam = new OrthographicCamera(-1, 1, 1, -1, 0.1, 100000);
     planCam.layers.set(0);
     planCam.layers.enable(2);
-    const personMark = new Mesh(
-      new SphereGeometry(1, 14, 10),
-      new MeshBasicMaterial({ color: 0xd4533c, depthTest: false }),
-    );
-    personMark.layers.set(2);
-    personMark.raycast = () => {};
-    personMark.visible = false;
-    scene.add(personMark);
+    const viewMark = new Group();
+    const markMaterial = (color: number) =>
+      new MeshBasicMaterial({ color, depthTest: false, depthWrite: false, transparent: true });
+    const markHalo = new Mesh(new SphereGeometry(0.9, 16, 12), markMaterial(0x1c2328));
+    const markDot = new Mesh(new SphereGeometry(0.55, 16, 12), markMaterial(0xd4533c));
+    const markArrow = new Mesh(new ConeGeometry(0.46, 1.45, 3), markMaterial(0xd4533c));
+    markArrow.position.y = 1.7;
+    for (const mesh of [markHalo, markDot, markArrow]) {
+      mesh.layers.set(2);
+      mesh.raycast = () => {};
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 60;
+      viewMark.add(mesh);
+    }
+    markHalo.renderOrder = 59;
+    viewMark.layers.set(2);
+    viewMark.frustumCulled = false;
+    scene.add(viewMark);
+    const lookFlat = new Vector3();
     const clear = new Color();
     const viewport = new Vector4();
     const scissor = new Vector4();
@@ -536,11 +558,7 @@ function EditorScene(
         planCam.bottom = -fittedHalf;
         planCam.right = fittedHalf * aspect;
         planCam.left = -fittedHalf * aspect;
-        personMark.visible = true;
-        personMark.scale.setScalar(Math.max(fittedHalf * 0.04, 6));
-        personMark.position.set(mainCam.position.x, mainCam.position.y, eye - 1);
       } else {
-        personMark.visible = false;
         const halfY = fittedHalf;
         planCam.position.set(center.x, center.y, center.z + Math.max(size.z, 1) + 80);
         planCam.lookAt(center.x, center.y, center.z);
@@ -551,6 +569,23 @@ function EditorScene(
         planCam.right = halfY * aspect;
         planCam.left = -halfY * aspect;
       }
+      const controls = controlsRef.current;
+      if (controls) lookFlat.copy(controls.target).sub(mainCam.position);
+      else mainCam.getWorldDirection(lookFlat);
+      if (lookFlat.x * lookFlat.x + lookFlat.y * lookFlat.y < 1e-4) lookFlat.set(mainCam.up.x, mainCam.up.y, 0);
+      const originX = walking ? mainCam.position.x : center.x;
+      const originY = walking ? mainCam.position.y : center.y;
+      const halfX = fittedHalf * aspect;
+      const camInside =
+        Math.abs(mainCam.position.x - originX) <= halfX && Math.abs(mainCam.position.y - originY) <= fittedHalf;
+      const focusX = controls ? controls.target.x : mainCam.position.x;
+      const focusY = controls ? controls.target.y : mainCam.position.y;
+      const markX = walking || camInside ? mainCam.position.x : focusX;
+      const markY = walking || camInside ? mainCam.position.y : focusY;
+      viewMark.visible = true;
+      viewMark.position.set(markX, markY, planCam.position.z - 24);
+      viewMark.scale.setScalar(Math.max(fittedHalf * 0.22, 6));
+      viewMark.rotation.z = Math.atan2(-lookFlat.x, lookFlat.y);
       planCam.updateProjectionMatrix();
       gl.getViewport(viewport);
       gl.getScissor(scissor);
@@ -570,12 +605,15 @@ function EditorScene(
     });
     return () => {
       remove();
-      scene.remove(personMark);
-      personMark.geometry.dispose();
-      const material = personMark.material;
-      if (material instanceof MeshBasicMaterial) material.dispose();
+      scene.remove(viewMark);
+      viewMark.traverse((obj) => {
+        const mesh = obj as Mesh;
+        mesh.geometry?.dispose();
+        const material = mesh.material;
+        if (material instanceof MeshBasicMaterial) material.dispose();
+      });
     };
-  }, [gl, scene, props.planSlot]);
+  }, [camera, gl, scene, props.planSlot]);
 
   useEffect(() => {
     const el = gl.domElement;
@@ -600,8 +638,8 @@ function EditorScene(
       if (propsRef.current.tool === 'walk') {
         const pixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 400 : event.deltaY;
         const distance = Math.max(-110, Math.min(110, -pixels * 0.28));
-        const { fx, fy, fz } = walkApi.current.basis();
-        walkApi.current.step(fx * distance, fy * distance, fz * distance);
+        const { fx, fy } = walkApi.current.basis();
+        walkApi.current.step(fx * distance, fy * distance, 0);
         return;
       }
       const pixels = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 400 : event.deltaY;
@@ -626,8 +664,8 @@ function EditorScene(
       pinch = span;
       if (propsRef.current.tool === 'walk') {
         const distance = Math.max(-110, Math.min(110, (1 - ratio) * 280));
-        const { fx, fy, fz } = walkApi.current.basis();
-        walkApi.current.step(fx * distance, fy * distance, fz * distance);
+        const { fx, fy } = walkApi.current.basis();
+        walkApi.current.step(fx * distance, fy * distance, 0);
         return;
       }
       zoomBy(ratio);
@@ -1508,7 +1546,13 @@ function EditorScene(
     else {
       walkKeys.current = { f: false, b: false, l: false, r: false, fast: false };
       walkLook.current = null;
-    }
+      walkNudge.current = {
+        prev: { f: false, b: false, l: false, r: false },
+        releasedAt: { f: 0, b: 0, l: 0, r: 0 },
+        passLeft: 0,
+        passed: 0,
+      };
+    };
     if (props.tool !== 'measure') {
       measureLockRef.current = null;
       setMeasureLock(null);
@@ -1715,7 +1759,10 @@ function EditorScene(
     });
     axesRef.current = helper;
   }
-  const walkScratch = useMemo(() => ({ origin: new Vector3(), dir: new Vector3(), dest: new Vector3() }), []);
+  const walkScratch = useMemo(
+    () => ({ origin: new Vector3(), dir: new Vector3(), dest: new Vector3(), normal: new Vector3() }),
+    [],
+  );
   {
     const cam = camera as PerspectiveCamera;
     const solidHits = (origin: Vector3, direction: Vector3, far: number) => {
@@ -1761,14 +1808,30 @@ function EditorScene(
       cam.position.z += dz;
       applyLook();
     };
+    const wallDistance = (dx: number, dy: number, reach: number) => {
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6 || reach <= 0) return null;
+      walkScratch.dir.set(dx / len, dy / len, 0);
+      let nearest: number | null = null;
+      for (const drop of [0, 32]) {
+        walkScratch.origin.set(cam.position.x, cam.position.y, cam.position.z - drop);
+        for (const hit of solidHits(walkScratch.origin, walkScratch.dir, reach)) {
+          const normal = hit.face?.normal;
+          if (normal) {
+            walkScratch.normal.copy(normal).transformDirection(hit.object.matrixWorld);
+            if (Math.abs(walkScratch.normal.z) > 0.72) continue;
+          }
+          if (nearest === null || hit.distance < nearest) nearest = hit.distance;
+        }
+      }
+      return nearest;
+    };
     const basis = () => {
-      const pitch = walkPitch.current;
       const yaw = walkYaw.current;
-      const cos = Math.cos(pitch);
       return {
-        fx: Math.sin(yaw) * cos,
-        fy: Math.cos(yaw) * cos,
-        fz: Math.sin(pitch),
+        fx: Math.sin(yaw),
+        fy: Math.cos(yaw),
+        fz: 0,
         lx: Math.cos(yaw),
         ly: -Math.sin(yaw),
       };
@@ -1802,6 +1865,7 @@ function EditorScene(
       },
       step,
       basis,
+      wallDistance,
     };
   }
 
@@ -1810,17 +1874,49 @@ function EditorScene(
       orbitHandle.visible = false;
       const keys = walkKeys.current;
       const speed = (keys.fast ? WALK_SPEED * 2.6 : WALK_SPEED) * Math.min(delta, 0.05);
-      const { fx, fy, fz, lx, ly } = walkApi.current.basis();
+      const { fx, fy, lx, ly } = walkApi.current.basis();
       let mx = 0;
       let my = 0;
-      let mz = 0;
-      if (keys.f) { mx += fx; my += fy; mz += fz; }
-      if (keys.b) { mx -= fx; my -= fy; mz -= fz; }
+      if (keys.f) { mx += fx; my += fy; }
+      if (keys.b) { mx -= fx; my -= fy; }
       if (keys.l) { mx -= lx; my -= ly; }
       if (keys.r) { mx += lx; my += ly; }
-      const mag = Math.hypot(mx, my, mz);
-      if (mag > 0) walkApi.current.step((mx / mag) * speed, (my / mag) * speed, (mz / mag) * speed);
-      else walkApi.current.step(0, 0, 0);
+      const nudge = walkNudge.current;
+      const now = performance.now();
+      const heading = { f: [fx, fy], b: [-fx, -fy], l: [-lx, -ly], r: [lx, ly] } as const;
+      for (const slot of ['f', 'b', 'l', 'r'] as const) {
+        const down = keys[slot];
+        if (down && !nudge.prev[slot]) {
+          const [hx, hy] = heading[slot];
+          const ahead = walkApi.current.wallDistance(hx, hy, WALK_BODY + 8);
+          if (ahead != null && ahead <= WALK_BODY + 8 && now - nudge.releasedAt[slot] <= WALK_PASS_GAP) {
+            nudge.passLeft = WALK_PASS_INCHES;
+            nudge.passed = 0;
+          }
+        }
+        if (!down && nudge.prev[slot]) nudge.releasedAt[slot] = now;
+        nudge.prev[slot] = down;
+      }
+      const mag = Math.hypot(mx, my);
+      if (mag > 0) {
+        let dist = speed;
+        if (nudge.passLeft > 0) {
+          dist = Math.min(dist, nudge.passLeft);
+          nudge.passLeft -= dist;
+          nudge.passed += dist;
+          if (nudge.passed > 14) {
+            const clear = walkApi.current.wallDistance(mx, my, WALK_BODY + 16);
+            if (clear == null || clear > WALK_BODY + 10) nudge.passLeft = 0;
+          }
+        } else {
+          const ahead = walkApi.current.wallDistance(mx, my, WALK_BODY + dist + 2);
+          if (ahead != null) {
+            const allowed = ahead - WALK_BODY;
+            dist = allowed <= 0.35 ? 0 : Math.min(dist, allowed);
+          }
+        }
+        walkApi.current.step((mx / mag) * dist, (my / mag) * dist, 0);
+      } else walkApi.current.step(0, 0, 0);
     } else orbitHandle.visible = true;
     const controls = controlsRef.current;
     if (!controls) return;
