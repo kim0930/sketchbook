@@ -14,6 +14,7 @@ import {
   Matrix4,
   LineBasicMaterial,
   LineSegments,
+  Line as ThreeLine,
   Mesh,
   MeshBasicMaterial,
   MeshLambertMaterial,
@@ -31,6 +32,7 @@ import {
   Vector3,
   type Intersection,
 } from 'three';
+import { beginMp4Capture, type Mp4Capture } from './mp4Capture';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
 import type { TransformControls as TransformControlsImpl } from 'three-stdlib';
 import {
@@ -123,12 +125,40 @@ const SNAP_RADIUS2 = { endpoint: 16 * 16, midpoint: 14 * 14, center: 12 * 12, ed
 const SNAP_RANK = { endpoint: 0, midpoint: 1, center: 2, edge: 3 } as const;
 type SnapKind = keyof typeof SNAP_LABEL;
 
+type RoutePoint = { x: number; y: number };
+
+function sampleRoute(points: readonly RoutePoint[], distance: number) {
+  const last = points.length - 1;
+  if (last < 1) return { x: points[0]?.x ?? 0, y: points[0]?.y ?? 0, yaw: 0, done: true };
+  let remain = Math.max(0, distance);
+  for (let i = 0; i < last; i++) {
+    const dx = points[i + 1].x - points[i].x;
+    const dy = points[i + 1].y - points[i].y;
+    const span = Math.hypot(dx, dy);
+    const yaw = Math.atan2(dx, dy);
+    if (remain <= span || i === last - 1) {
+      const t = span < 1e-6 ? 0 : Math.min(1, remain / span);
+      return {
+        x: points[i].x + dx * t,
+        y: points[i].y + dy * t,
+        yaw,
+        done: i === last - 1 && remain >= span,
+      };
+    }
+    remain -= span;
+  }
+  return { x: points[last].x, y: points[last].y, yaw: 0, done: true };
+}
+
 function formatDelta(delta: Vec3, unit: Unit): string {
   return `Δx ${formatLength(delta[0], unit)} · Δy ${formatLength(delta[1], unit)} · Δz ${formatLength(delta[2], unit)}`;
 }
 
 const WALK_SPEED = 105;
 const WALK_BODY = 12;
+const MODEL_FOV = 42;
+const WALK_FOV = 60;
+const ROUTE_SPEED = 56;
 const WALK_PASS_GAP = 500;
 const WALK_PASS_INCHES = 48;
 
@@ -235,6 +265,30 @@ export function Viewport(props: ViewportProps) {
   const planMetrics = useRef<PlanMetrics>({ halfX: 1, halfY: 1, width: 1, height: 1, lookX: 0, lookY: 0, markX: 0, markY: 0, markFollowsEye: false });
   const toolRef = useRef(props.tool);
   toolRef.current = props.tool;
+  const [route, setRoute] = useState<RoutePoint[]>([]);
+  const [routePlace, setRoutePlace] = useState(false);
+  const [routeBusy, setRouteBusy] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [routeNote, setRouteNote] = useState('');
+  const [routeCommand, setRouteCommand] = useState<{ id: number; kind: 'play' | 'record' } | null>(null);
+  const routePlaceRef = useRef(false);
+  routePlaceRef.current = routePlace && props.tool === 'walk' && !routeBusy;
+  const addRoutePoint = useRef<(x: number, y: number) => void>(() => {});
+  addRoutePoint.current = (x, y) => {
+    setRoute((points) => [...points, { x, y }]);
+    setRouteNote('');
+  };
+  const onRecording = useRef<(value: boolean) => void>(() => {});
+  onRecording.current = setRecording;
+  const onRouteDone = useRef<(kind: 'play' | 'saved' | 'error', message?: string) => void>(() => {});
+  onRouteDone.current = (_kind, message) => {
+    setRouteBusy(false);
+    setRecording(false);
+    if (message) setRouteNote(message);
+  };
+  useEffect(() => {
+    if (props.tool !== 'walk') setRoutePlace(false);
+  }, [props.tool]);
   const planAim = useRef<PlanAim | null>(null);
   const planAiming = useRef(false);
   const planAnchor = useRef<{ x: number; y: number } | null>(null);
@@ -292,7 +346,7 @@ export function Viewport(props: ViewportProps) {
       if (nx < -0.08 || nx > 1.08 || ny < -0.08 || ny > 1.08) return false;
       const sx = rect.left + nx * rect.width;
       const sy = rect.top + ny * rect.height;
-      const radius = Math.max(26, Math.min(rect.width, rect.height) * 0.16);
+      const radius = Math.max(16, Math.min(rect.width, rect.height) * 0.07);
       return Math.hypot(clientX - sx, clientY - sy) <= radius;
     };
     const aimAt = (clientX: number, clientY: number, eye: boolean) => {
@@ -369,6 +423,14 @@ export function Viewport(props: ViewportProps) {
         return;
       }
       clickStamp = now;
+      if (routePlaceRef.current && toolRef.current === 'walk' && !finished.aim) {
+        const metrics = planMetrics.current;
+        const rect = el.getBoundingClientRect();
+        const nx = (finished.startX - rect.left) / Math.max(rect.width, 1);
+        const ny = (finished.startY - rect.top) / Math.max(rect.height, 1);
+        addRoutePoint.current(metrics.lookX + (nx - 0.5) * 2 * metrics.halfX, metrics.lookY + (0.5 - ny) * 2 * metrics.halfY);
+        return;
+      }
       aimAt(finished.startX, finished.startY, toolRef.current === 'walk' || (finished.aim && planMetrics.current.markFollowsEye));
     };
     const onDoubleClick = (event: MouseEvent) => {
@@ -422,8 +484,8 @@ export function Viewport(props: ViewportProps) {
       onContextMenu={(event) => event.preventDefault()}
     >
       <Canvas
-        camera={{ fov: 42, near: 0.05, far: 500000, position: [190, -210, 130] }}
-        gl={{ antialias: true, logarithmicDepthBuffer: true }}
+        camera={{ fov: MODEL_FOV, near: 0.05, far: 500000, position: [190, -210, 130] }}
+        gl={{ antialias: true, logarithmicDepthBuffer: true, preserveDrawingBuffer: true }}
         onCreated={({ camera, gl }) => {
           camera.up.set(0, 0, 1);
           camera.layers.enable(1);
@@ -435,9 +497,9 @@ export function Viewport(props: ViewportProps) {
         <hemisphereLight args={['#f5f9fc', '#eadfce', 0.78]} position={[0, 0, 200]} />
         <directionalLight position={[220, -280, 360]} intensity={1.2} />
         <ambientLight intensity={0.22} />
-        <EditorScene {...props} planSlot={planSlot} planZoom={planZoom} planPan={planPan} planMetrics={planMetrics} planAim={planAim} planAiming={planAiming} planAnchor={planAnchor} section={section} eyeInches={eyeInches} walkHold={walkHold} />
+        <EditorScene {...props} planSlot={planSlot} planZoom={planZoom} planPan={planPan} planMetrics={planMetrics} planAim={planAim} planAiming={planAiming} planAnchor={planAnchor} section={section} eyeInches={eyeInches} walkHold={walkHold} route={route} routeCommand={routeCommand} onRecording={onRecording} onRouteDone={onRouteDone} />
       </Canvas>
-      <div className="plan-card">
+      <div className={recording ? 'plan-card recording' : 'plan-card'}>
         <div className="plan-view" ref={planSlot} role="application" aria-label="평면도" title="빈 곳을 끌면 평면도가 움직입니다 · 빨간 표시를 끌거나 클릭하면 보는 위치가 이동합니다 · 두 번 클릭하면 가운데로">
           <button
             type="button"
@@ -509,6 +571,46 @@ export function Viewport(props: ViewportProps) {
             </>
           )}
           {props.tool === 'walk' && (
+            <div className="route-tools">
+              <button type="button" className={routePlace ? 'on' : ''} onClick={() => setRoutePlace((value) => !value)}>
+                점 찍기
+              </button>
+              <button type="button" disabled={!route.length || routeBusy} onClick={() => setRoute((points) => points.slice(0, -1))}>
+                취소
+              </button>
+              <button type="button" disabled={!route.length || routeBusy} onClick={() => { setRoute([]); setRouteNote(''); }}>
+                지우기
+              </button>
+              <button
+                type="button"
+                disabled={route.length < 2 || routeBusy}
+                onClick={() => { setRouteBusy(true); setRouteNote(''); setRouteCommand({ id: Date.now(), kind: 'play' }); }}
+              >
+                따라가기
+              </button>
+              <button
+                type="button"
+                disabled={route.length < 2 || routeBusy}
+                onClick={() => { setRouteBusy(true); setRouteNote(''); setRouteCommand({ id: Date.now(), kind: 'record' }); }}
+              >
+                동영상
+              </button>
+              <p>
+                {recording
+                  ? '걷는 장면을 저장하는 중입니다.'
+                  : routeBusy
+                    ? '경로를 따라 걷는 중입니다.'
+                    : routeNote
+                      ? routeNote
+                      : routePlace
+                        ? `평면도를 클릭해 점을 찍습니다.${route.length ? ` 지금 ${route.length}개.` : ''}`
+                        : route.length
+                          ? `점 ${route.length}개. 두 점부터 그 길을 걸어갑니다.`
+                          : '점 찍기로 길을 만든 뒤 따라가거나 동영상으로 저장합니다.'}
+              </p>
+            </div>
+          )}
+          {props.tool === 'walk' && (
             <label>
               눈높이 {formatLength(eyeInches, props.unit)}
               <input
@@ -565,6 +667,10 @@ function EditorScene(
     planAim: RefObject<PlanAim | null>;
     planAiming: RefObject<boolean>;
     planAnchor: RefObject<{ x: number; y: number } | null>;
+    route: RoutePoint[];
+    routeCommand: { id: number; kind: 'play' | 'record' } | null;
+    onRecording: RefObject<(value: boolean) => void>;
+    onRouteDone: RefObject<(kind: 'play' | 'saved' | 'error', message?: string) => void>;
     section: SectionCut | null;
     eyeInches: number;
     walkHold: RefObject<(dir: 'f' | 'b' | 'l' | 'r', down: boolean) => void>;
@@ -573,6 +679,12 @@ function EditorScene(
   const { camera, gl, scene } = useThree();
   const propsRef = useRef(props);
   propsRef.current = props;
+  const routeRef = useRef(props.route);
+  routeRef.current = props.route;
+  const hidePlan = useRef(false);
+  const routePlay = useRef<{ distance: number; active: boolean; warmup: number; hold: number; record: boolean } | null>(null);
+  const recorderRef = useRef<Mp4Capture | null>(null);
+  const captureGen = useRef(0);
   const [preview, setPreview] = useState<SketchDocument | null>(null);
   const [rubber, setRubber] = useState<Vec3[] | null>(null);
   const [measureLock, setMeasureLock] = useState<{ a: Vec3; b: Vec3 } | null>(null);
@@ -589,6 +701,7 @@ function EditorScene(
     step: (_dx: number, _dy: number, _dz: number) => {},
     basis: () => ({ fx: 0, fy: 1, fz: 0, lx: 1, ly: 0 }),
     wallDistance: (_dx: number, _dy: number, _reach: number) => null as number | null,
+    stand: (_x: number, _y: number, _yaw: number) => {},
   });
   const walkNudge = useRef({
     prev: { f: false, b: false, l: false, r: false },
@@ -718,6 +831,10 @@ function EditorScene(
     const viewport = new Vector4();
     const scissor = new Vector4();
     const remove = addAfterEffect(() => {
+      if (hidePlan.current) {
+        recorderRef.current?.snapshot(gl.domElement);
+        return;
+      }
       const slot = props.planSlot.current;
       const canvas = gl.domElement;
       if (!slot) return;
@@ -798,7 +915,7 @@ function EditorScene(
       propsRef.current.planMetrics.current.markY = markY;
       propsRef.current.planMetrics.current.markFollowsEye = walking || camInside;
       viewMark.position.set(markX, markY, planCam.position.z - 24);
-      viewMark.scale.setScalar(Math.max(fittedHalf * 0.22, 6));
+      viewMark.scale.setScalar(Math.max(fittedHalf * 0.09, 2.2));
       viewMark.rotation.z = Math.atan2(-lookFlat.x, lookFlat.y);
       planCam.updateProjectionMatrix();
       gl.getViewport(viewport);
@@ -2100,8 +2217,25 @@ function EditorScene(
           ? 'crosshair'
           : '';
     if (props.tool === 'navigate' || props.tool === 'walk') setHover(null);
-    if (props.tool === 'walk') walkApi.current.begin();
-    else {
+    const cam = camera as PerspectiveCamera;
+    if (props.tool === 'walk') {
+      cam.fov = WALK_FOV;
+      cam.updateProjectionMatrix();
+      walkApi.current.begin();
+    } else {
+      if (Math.abs(cam.fov - MODEL_FOV) > 0.1) {
+        cam.fov = MODEL_FOV;
+        cam.updateProjectionMatrix();
+      }
+      routePlay.current = null;
+      captureGen.current += 1;
+      const recording = recorderRef.current;
+      recorderRef.current = null;
+      if (recording) recording.finish();
+      else {
+        hidePlan.current = false;
+        props.onRouteDone.current('play', '');
+      }
       walkKeys.current = { f: false, b: false, l: false, r: false, fast: false };
       walkLook.current = null;
       walkNudge.current = {
@@ -2480,11 +2614,126 @@ function EditorScene(
       step,
       basis,
       wallDistance,
+      stand(x: number, y: number, yaw: number) {
+        walkYaw.current = yaw;
+        walkPitch.current = -0.08;
+        const eye = propsRef.current.eyeInches;
+        cam.position.x = x;
+        cam.position.y = y;
+        cam.position.z = lowestFloor(x, y) + eye;
+        eyeApplied.current = eye;
+        applyLook();
+      },
     };
   }
 
+  const routeMark = useMemo(() => {
+    const group = new Group();
+    group.layers.set(2);
+    group.frustumCulled = false;
+    const line = new ThreeLine(new BufferGeometry(), new LineBasicMaterial({ color: 0xd4533c, depthTest: false }));
+    line.layers.set(2);
+    line.frustumCulled = false;
+    line.renderOrder = 55;
+    group.add(line);
+    return group;
+  }, []);
+  const routeDot = useMemo(() => new SphereGeometry(1, 10, 8), []);
+  const routeDotMat = useMemo(() => new MeshBasicMaterial({ color: 0xd4533c, depthTest: false }), []);
+  useLayoutEffect(() => {
+    const line = routeMark.children[0] as ThreeLine;
+    const positions: number[] = [];
+    for (const point of props.route) positions.push(point.x, point.y, 8);
+    line.geometry.setAttribute('position', new Float32BufferAttribute(positions.length ? positions : [0, 0, 0], 3));
+    line.geometry.computeBoundingSphere();
+    line.visible = props.route.length >= 2;
+    for (let index = routeMark.children.length - 1; index >= 1; index--) routeMark.children[index].removeFromParent();
+    for (const point of props.route) {
+      const dot = new Mesh(routeDot, routeDotMat);
+      dot.position.set(point.x, point.y, 8);
+      dot.layers.set(2);
+      dot.frustumCulled = false;
+      dot.userData.routeDot = true;
+      routeMark.add(dot);
+    }
+  }, [props.route, routeMark, routeDot, routeDotMat]);
+
+  useEffect(() => {
+    const command = props.routeCommand;
+    if (!command || propsRef.current.tool !== 'walk') return;
+    const points = routeRef.current;
+    if (points.length < 2) {
+      props.onRouteDone.current('error', '점을 두 개 이상 찍어 주세요.');
+      return;
+    }
+    const yaw = Math.atan2(points[1].x - points[0].x, points[1].y - points[0].y);
+    walkApi.current.stand(points[0].x, points[0].y, yaw);
+    const record = command.kind === 'record';
+    if (!record) {
+      routePlay.current = { distance: 0, active: true, warmup: 0, hold: 0, record: false };
+      return;
+    }
+    const canvas = gl.domElement;
+    const id = ++captureGen.current;
+    hidePlan.current = true;
+    props.onRecording.current(true);
+    void beginMp4Capture(canvas, (blob, error) => {
+      hidePlan.current = false;
+      recorderRef.current = null;
+      props.onRecording.current(false);
+      if (!blob) {
+        props.onRouteDone.current('error', error || '동영상 프레임을 만들지 못했습니다.');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${propsRef.current.doc.name || 'walk'}-walk.mp4`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+      props.onRouteDone.current('saved', '동영상을 MP4로 저장했습니다.');
+    }).then((capture) => {
+      if (!capture || captureGen.current !== id || propsRef.current.tool !== 'walk') {
+        capture?.discard();
+        if (captureGen.current === id) {
+          routePlay.current = null;
+          hidePlan.current = false;
+          props.onRecording.current(false);
+        }
+        return;
+      }
+      recorderRef.current = capture;
+      routePlay.current = { distance: 0, active: true, warmup: 0.2, hold: 0, record: true };
+    });
+  }, [props.routeCommand, gl]);
+
   useFrame((_, delta) => {
-    if (props.tool === 'walk') {
+    const markScale = Math.max(propsRef.current.planMetrics.current.halfY * 0.018, 1.4);
+    for (const child of routeMark.children) {
+      if (child.userData.routeDot) child.scale.setScalar(markScale);
+    }
+    const playing = props.tool === 'walk' ? routePlay.current : null;
+    if (playing?.active) {
+      orbitHandle.visible = false;
+      const dt = Math.min(delta, 0.05);
+      if (playing.warmup > 0) playing.warmup -= dt;
+      else {
+        playing.distance += ROUTE_SPEED * dt;
+        const sample = sampleRoute(routeRef.current, playing.distance);
+        walkApi.current.stand(sample.x, sample.y, sample.yaw);
+        if (sample.done) {
+          playing.hold += dt;
+          if (playing.hold > 0.7) {
+            const recorded = playing.record;
+            routePlay.current = null;
+            const rec = recorderRef.current;
+            recorderRef.current = null;
+            if (recorded && rec) rec.finish();
+            else props.onRouteDone.current('play', '경로를 끝까지 걸었습니다.');
+          }
+        }
+      }
+    } else if (props.tool === 'walk') {
       orbitHandle.visible = false;
       const keys = walkKeys.current;
       const speed = (keys.fast ? WALK_SPEED * 2.6 : WALK_SPEED) * Math.min(delta, 0.05);
@@ -2534,7 +2783,7 @@ function EditorScene(
     } else orbitHandle.visible = true;
     const controls = controlsRef.current;
     const aim = propsRef.current.planAim.current;
-    if (aim && aim.seq !== planAimSeq.current) {
+    if (aim && aim.seq !== planAimSeq.current && !routePlay.current?.active) {
       planAimSeq.current = aim.seq;
       const cam = camera as PerspectiveCamera;
       if (props.tool === 'walk' || aim.eye) {
@@ -2586,6 +2835,7 @@ function EditorScene(
       <primitive object={gridRef.current} />
       <primitive object={axesRef.current} />
       <primitive object={orbitHandle} />
+      <primitive object={routeMark} />
       <primitive object={snapMarker} />
       <primitive ref={modelRef} object={built.group} />
       <primitive object={pivot} />

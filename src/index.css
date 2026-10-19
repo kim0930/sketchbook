@@ -68,7 +68,7 @@ button:disabled { opacity: 0.35; cursor: default; }
 }
 .topbar button.primary { background: var(--accent); border-color: #b8432e; }
 .topbar button.on { background: #f4f1ea; color: var(--ink); border-color: #f4f1ea; }
-.topbar button.icon-btn, .tools button { padding: 0; width: 32px; height: 32px; display: grid; place-items: center; }
+.topbar button.icon-btn { padding: 0; width: 32px; height: 32px; display: grid; place-items: center; }
 .menu { position: relative; }
 .menu-pop {
   position: absolute;
@@ -160,22 +160,34 @@ button:disabled { opacity: 0.35; cursor: default; }
 }
 .dim-label.on { border-color: #0d47a1; font-weight: 650; }
 .tools {
-  width: 52px;
+  width: 64px;
   background: #1b2429;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 8px 0;
+  gap: 2px;
+  padding: 6px 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 .tools button {
-  width: 36px;
-  height: 36px;
+  width: 56px;
+  height: auto;
+  min-height: 44px;
   border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
   color: #d5dee4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 4px 0 3px;
+  font-size: 10px;
+  line-height: 1.15;
 }
+.tools button span { font-size: 10px; letter-spacing: -0.03em; }
 .tools button.active { background: #f4f1ea; color: var(--ink); }
 .tools svg, .icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linejoin: round; stroke-linecap: round; }
 
@@ -187,7 +199,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   z-index: 3;
   top: 10px;
   left: 10px;
-  width: var(--plan-w, 190px);
+  width: var(--plan-w, 380px);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -195,7 +207,7 @@ button:disabled { opacity: 0.35; cursor: default; }
 }
 .plan-view {
   position: relative;
-  height: var(--plan-h, 148px);
+  height: var(--plan-h, 296px);
   border: 1px solid #d5cbbd;
   border-radius: 8px;
   box-shadow: 0 8px 22px rgba(28, 35, 40, 0.16);
@@ -273,12 +285,22 @@ button:disabled { opacity: 0.35; cursor: default; }
 .plan-tools header button.on { background: var(--ink); color: white; border-color: var(--ink); }
 .plan-tools label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
 .plan-tools input[type='range'] { width: 100%; accent-color: var(--accent); }
+.route-tools { display: flex; flex-wrap: wrap; gap: 4px; }
+.route-tools button {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 7px;
+}
+.route-tools button.on { background: var(--ink); color: white; border-color: var(--ink); }
+.route-tools p { flex: 1 0 100%; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.35; }
+.plan-card.recording { visibility: hidden; }
 
 .banner {
   position: absolute;
   z-index: 2;
   top: 10px;
-  left: calc(var(--plan-w, 190px) + 20px);
+  left: calc(var(--plan-w, 380px) + 20px);
   display: flex;
   gap: 6px;
   align-items: center;
@@ -493,7 +515,8 @@ button:disabled { opacity: 0.35; cursor: default; }
     scrollbar-width: none;
   }
   .tools::-webkit-scrollbar { display: none; }
-  .tools button { width: 44px; height: 44px; flex: 0 0 44px; }
+  .tools button { width: 44px; height: 44px; min-height: 44px; flex: 0 0 44px; padding: 0; }
+  .tools button span { display: none; }
 
   .library {
     position: fixed;
@@ -528,12 +551,12 @@ button:disabled { opacity: 0.35; cursor: default; }
     padding-bottom: env(safe-area-inset-bottom);
   }
 
-  .plan-card { width: var(--plan-w, 132px); top: 8px; left: 8px; }
-  .plan-view { height: var(--plan-h, 96px); }
+  .plan-card { width: var(--plan-w, 264px); top: 8px; left: 8px; }
+  .plan-view { height: var(--plan-h, 192px); }
   .banner {
     left: 8px;
     right: 8px;
-    top: 112px;
+    top: calc(16px + var(--plan-h, 192px));
     max-width: none;
     flex-wrap: wrap;
     border-radius: 12px;
@@ -605,9 +628,9 @@ button:disabled { opacity: 0.35; cursor: default; }
   .tool-hint { display: none; }
   .status { flex-wrap: nowrap; overflow-x: auto; }
   .views { flex: 0 0 auto; }
-  .plan-card { width: var(--plan-w, 108px); }
-  .plan-view { height: var(--plan-h, 72px); }
-  .banner { top: 86px; }
+  .plan-card { width: var(--plan-w, 216px); }
+  .plan-view { height: var(--plan-h, 144px); }
+  .banner { top: calc(12px + var(--plan-h, 144px)); }
   .help { max-height: 72px; overflow: auto; }
   .walk-pad { grid-template-columns: 44px 44px 44px; }
   .walk-pad button { width: 44px; height: 44px; }

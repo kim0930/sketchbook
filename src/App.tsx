@@ -63,9 +63,9 @@ import {
 import { LibraryPanel } from './ui/LibraryPanel.tsx';
 import { Viewport } from './viewport/Viewport.tsx';
 
-const TOOLS: { id: Tool; label: string; key: string; hint: string; icon: ReactNode }[] = [
+const TOOLS: { id: Tool; label: string; name?: string; key: string; hint: string; icon: ReactNode }[] = [
   { id: 'navigate', label: '탐색', key: 'H', hint: '왼쪽 드래그로 둘러보고, 오른쪽 드래그로 이동합니다. 모델은 선택되지 않습니다.', icon: <IconHand /> },
-  { id: 'walk', label: '걷기', key: 'K', hint: '바라보는 방향으로 WASD·방향키가 움직입니다. 벽은 한 번 막히고, 같은 방향키를 빠르게 다시 누르면 통과합니다. Shift는 더 빠릅니다.', icon: <IconWalk /> },
+  { id: 'walk', label: '걷기', key: 'K', hint: '바라보는 방향으로 WASD·방향키가 움직입니다. 시야는 세로 60도입니다. 벽은 한 번 막히고, 같은 방향키를 빠르게 다시 누르면 통과합니다. Shift는 더 빠릅니다. 평면도에서 경로를 찍으면 그 길을 걸어가고 동영상으로 저장합니다.', icon: <IconWalk /> },
   { id: 'select', label: '선택', key: 'V', hint: '클릭하면 그룹이나 면이 선택됩니다. Shift+클릭으로 더하고, 드래그하면 영역 안을 고릅니다. Alt+클릭은 선입니다. 더블클릭으로 그룹 안으로 들어갑니다.', icon: <IconSelect /> },
   { id: 'line', label: '선', key: 'L', hint: '점을 이어서 클릭하고, 시작점에 맞추거나 Enter로 면을 닫습니다. 끝점·중간점·선 위에 붙습니다.', icon: <IconLine /> },
   { id: 'rect', label: '사각형', key: 'R', hint: '첫 모서리와 반대 모서리를 찍습니다. 치수는 80, 60 처럼 입력합니다. 끝점·중간점에 붙습니다.', icon: <IconRect /> },
@@ -73,7 +73,7 @@ const TOOLS: { id: Tool; label: string; key: string; hint: string; icon: ReactNo
   { id: 'arc', label: '호', key: 'A', hint: '중심, 시작, 끝을 찍으면 반시계 방향 부채꼴 면이 생깁니다. 치수는 각도(도)입니다. 단면이 켜져 있으면 절단면에 그려집니다.', icon: <IconArc /> },
   { id: 'offset', label: '오프셋', key: 'O', hint: '면을 클릭한 뒤 안팎으로 끕니다. 안쪽으로 끌면 테두리와 안쪽 면이 나뉩니다. 치수로 두께를 줄 수 있습니다.', icon: <IconOffset /> },
   { id: 'measure', label: '측정', key: 'T', hint: '두 점을 찍으면 치수로 남습니다. 선 위에서는 길이, 면 위에서는 면적을 보여 줍니다.', icon: <IconMeasure /> },
-  { id: 'pushpull', label: '밀기/끌기', key: 'P', hint: '면을 드래그해 입체로 만들거나 두께를 바꿉니다.', icon: <IconPush /> },
+  { id: 'pushpull', label: '밀기/끌기', name: '밀기', key: 'P', hint: '면을 드래그해 입체로 만들거나 두께를 바꿉니다.', icon: <IconPush /> },
   { id: 'move', label: '이동', key: 'M', hint: '선택한 뒤 축 핸들을 드래그합니다. 치수는 x, y, z.', icon: <IconMove /> },
   { id: 'rotate', label: '회전', key: 'Q', hint: '선택한 물체를 빨간·초록·파란 축으로 회전합니다.', icon: <IconRotate /> },
   { id: 'scale', label: '배율', key: 'S', hint: '선택한 물체의 크기를 바꿉니다.', icon: <IconScale /> },
@@ -772,6 +772,7 @@ export default function App() {
               onClick={() => setTool(item.id)}
             >
               {item.icon}
+              <span>{item.name ?? item.label}</span>
             </button>
           ))}
         </nav>
