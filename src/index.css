@@ -15,6 +15,17 @@
 
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; }
+html, body, #root, .app {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea, [contenteditable='true'] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+img, svg, canvas, a { -webkit-user-drag: none; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { opacity: 0.35; cursor: default; }
@@ -276,6 +287,7 @@ button:disabled { opacity: 0.35; cursor: default; }
 }
 .plan-tools header { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .plan-tools header b { font-size: 12px; font-weight: 650; }
+.plan-tools-actions { display: flex; align-items: center; gap: 4px; }
 .plan-tools header button, .plan-tools select {
   background: white;
   border: 1px solid var(--line);
@@ -283,6 +295,8 @@ button:disabled { opacity: 0.35; cursor: default; }
   padding: 3px 7px;
 }
 .plan-tools header button.on { background: var(--ink); color: white; border-color: var(--ink); }
+.plan-tools-toggle { min-width: 28px; padding-left: 0; padding-right: 0; line-height: 1; font-weight: 700; }
+.plan-tools.collapsed { padding: 4px 8px; gap: 0; }
 .plan-tools label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; }
 .plan-tools input[type='range'] { width: 100%; accent-color: var(--accent); }
 .route-tools { display: flex; flex-wrap: wrap; gap: 4px; }

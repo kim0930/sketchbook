@@ -298,6 +298,7 @@ export function Viewport(props: ViewportProps) {
   const [sectionAxis, setSectionAxis] = useState<SectionCut['axis']>('z');
   const [sectionT, setSectionT] = useState(0.68);
   const [eyeInches, setEyeInches] = useState(63);
+  const [planToolsOpen, setPlanToolsOpen] = useState(true);
   const bounds = useMemo(() => modelBounds(props.doc), [props.doc]);
   const wasWalk = useRef(props.tool === 'walk');
   useEffect(() => {
@@ -537,92 +538,110 @@ export function Viewport(props: ViewportProps) {
             </button>
           </div>
         </div>
-        <div className="plan-tools">
+        <div className={planToolsOpen ? 'plan-tools' : 'plan-tools collapsed'}>
           <header>
             <b>{props.tool === 'walk' ? '눈높이' : '평면도'}</b>
-            <button
-              type="button"
-              className={sectionOn ? 'on' : ''}
-              title="이 위치 너머를 숨깁니다. 선·사각형·원·호는 이 절단면에 그려집니다"
-              onClick={() => setSectionOn((value) => !value)}
-            >
-              단면
-            </button>
-          </header>
-          {sectionOn && (
-            <>
-              <select aria-label="단면 방향" value={sectionAxis} onChange={(event) => setSectionAxis(event.target.value as SectionCut['axis'])}>
-                <option value="z">수평 · 지붕 자르기</option>
-                <option value="y">정면 자르기</option>
-                <option value="x">측면 자르기</option>
-              </select>
-              <label>
-                자르는 위치 {bounds ? formatLength(cutInches, props.unit) : ''}
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.005}
-                  value={sectionT}
-                  aria-label="단면 위치"
-                  onChange={(event) => setSectionT(Number(event.target.value))}
-                />
-              </label>
-            </>
-          )}
-          {props.tool === 'walk' && (
-            <div className="route-tools">
-              <button type="button" className={routePlace ? 'on' : ''} onClick={() => setRoutePlace((value) => !value)}>
-                점 찍기
-              </button>
-              <button type="button" disabled={!route.length || routeBusy} onClick={() => setRoute((points) => points.slice(0, -1))}>
-                취소
-              </button>
-              <button type="button" disabled={!route.length || routeBusy} onClick={() => { setRoute([]); setRouteNote(''); }}>
-                지우기
-              </button>
+            <div className="plan-tools-actions">
+              {planToolsOpen && (
+                <button
+                  type="button"
+                  className={sectionOn ? 'on' : ''}
+                  title="이 위치 너머를 숨깁니다. 선·사각형·원·호는 이 절단면에 그려집니다"
+                  onClick={() => setSectionOn((value) => !value)}
+                >
+                  단면
+                </button>
+              )}
               <button
                 type="button"
-                disabled={route.length < 2 || routeBusy}
-                onClick={() => { setRouteBusy(true); setRouteNote(''); setRouteCommand({ id: Date.now(), kind: 'play' }); }}
+                className="plan-tools-toggle"
+                aria-expanded={planToolsOpen}
+                aria-label={planToolsOpen ? '도구 접기' : '도구 펼치기'}
+                title={planToolsOpen ? '접기' : '펼치기'}
+                onClick={() => setPlanToolsOpen((value) => !value)}
               >
-                따라가기
+                {planToolsOpen ? '−' : '+'}
               </button>
-              <button
-                type="button"
-                disabled={route.length < 2 || routeBusy}
-                onClick={() => { setRouteBusy(true); setRouteNote(''); setRouteCommand({ id: Date.now(), kind: 'record' }); }}
-              >
-                동영상
-              </button>
-              <p>
-                {recording
-                  ? '걷는 장면을 저장하는 중입니다.'
-                  : routeBusy
-                    ? '경로를 따라 걷는 중입니다.'
-                    : routeNote
-                      ? routeNote
-                      : routePlace
-                        ? `평면도를 클릭해 점을 찍습니다.${route.length ? ` 지금 ${route.length}개.` : ''}`
-                        : route.length
-                          ? `점 ${route.length}개. 두 점부터 그 길을 걸어갑니다.`
-                          : '점 찍기로 길을 만든 뒤 따라가거나 동영상으로 저장합니다.'}
-              </p>
             </div>
-          )}
-          {props.tool === 'walk' && (
-            <label>
-              눈높이 {formatLength(eyeInches, props.unit)}
-              <input
-                type="range"
-                min={24}
-                max={120}
-                step={0.5}
-                value={eyeInches}
-                aria-label="눈높이"
-                onChange={(event) => setEyeInches(Number(event.target.value))}
-              />
-            </label>
+          </header>
+          {planToolsOpen && (
+            <>
+              {sectionOn && (
+                <>
+                  <select aria-label="단면 방향" value={sectionAxis} onChange={(event) => setSectionAxis(event.target.value as SectionCut['axis'])}>
+                    <option value="z">수평 · 지붕 자르기</option>
+                    <option value="y">정면 자르기</option>
+                    <option value="x">측면 자르기</option>
+                  </select>
+                  <label>
+                    자르는 위치 {bounds ? formatLength(cutInches, props.unit) : ''}
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.005}
+                      value={sectionT}
+                      aria-label="단면 위치"
+                      onChange={(event) => setSectionT(Number(event.target.value))}
+                    />
+                  </label>
+                </>
+              )}
+              {props.tool === 'walk' && (
+                <div className="route-tools">
+                  <button type="button" className={routePlace ? 'on' : ''} onClick={() => setRoutePlace((value) => !value)}>
+                    점 찍기
+                  </button>
+                  <button type="button" disabled={!route.length || routeBusy} onClick={() => setRoute((points) => points.slice(0, -1))}>
+                    취소
+                  </button>
+                  <button type="button" disabled={!route.length || routeBusy} onClick={() => { setRoute([]); setRouteNote(''); }}>
+                    지우기
+                  </button>
+                  <button
+                    type="button"
+                    disabled={route.length < 2 || routeBusy}
+                    onClick={() => { setRouteBusy(true); setRouteNote(''); setRouteCommand({ id: Date.now(), kind: 'play' }); }}
+                  >
+                    따라가기
+                  </button>
+                  <button
+                    type="button"
+                    disabled={route.length < 2 || routeBusy}
+                    onClick={() => { setRouteBusy(true); setRouteNote(''); setRouteCommand({ id: Date.now(), kind: 'record' }); }}
+                  >
+                    동영상
+                  </button>
+                  <p>
+                    {recording
+                      ? '걷는 장면을 저장하는 중입니다. 화면을 끌면 시선이 돌아갑니다.'
+                      : routeBusy
+                        ? '경로를 따라 걷는 중입니다. 화면을 끌면 시선이 돌아갑니다.'
+                        : routeNote
+                          ? routeNote
+                          : routePlace
+                            ? `평면도를 클릭해 점을 찍습니다.${route.length ? ` 지금 ${route.length}개.` : ''}`
+                            : route.length
+                              ? `점 ${route.length}개. 두 점부터 그 길을 걸어갑니다.`
+                              : '점 찍기로 길을 만든 뒤 따라가거나 동영상으로 저장합니다.'}
+                  </p>
+                </div>
+              )}
+              {props.tool === 'walk' && (
+                <label>
+                  눈높이 {formatLength(eyeInches, props.unit)}
+                  <input
+                    type="range"
+                    min={24}
+                    max={120}
+                    step={0.5}
+                    value={eyeInches}
+                    aria-label="눈높이"
+                    onChange={(event) => setEyeInches(Number(event.target.value))}
+                  />
+                </label>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -701,7 +720,7 @@ function EditorScene(
     step: (_dx: number, _dy: number, _dz: number) => {},
     basis: () => ({ fx: 0, fy: 1, fz: 0, lx: 1, ly: 0 }),
     wallDistance: (_dx: number, _dy: number, _reach: number) => null as number | null,
-    stand: (_x: number, _y: number, _yaw: number) => {},
+    stand: (_x: number, _y: number, _yaw?: number) => {},
   });
   const walkNudge = useRef({
     prev: { f: false, b: false, l: false, r: false },
@@ -2614,9 +2633,11 @@ function EditorScene(
       step,
       basis,
       wallDistance,
-      stand(x: number, y: number, yaw: number) {
-        walkYaw.current = yaw;
-        walkPitch.current = -0.08;
+      stand(x: number, y: number, yaw?: number) {
+        if (yaw != null) {
+          walkYaw.current = yaw;
+          walkPitch.current = -0.08;
+        }
         const eye = propsRef.current.eyeInches;
         cam.position.x = x;
         cam.position.y = y;
@@ -2720,7 +2741,7 @@ function EditorScene(
       else {
         playing.distance += ROUTE_SPEED * dt;
         const sample = sampleRoute(routeRef.current, playing.distance);
-        walkApi.current.stand(sample.x, sample.y, sample.yaw);
+        walkApi.current.stand(sample.x, sample.y);
         if (sample.done) {
           playing.hold += dt;
           if (playing.hold > 0.7) {
