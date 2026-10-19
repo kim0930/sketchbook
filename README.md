@@ -1,32 +1,62 @@
-# React + TypeScript + Vite
+# 스케치북
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+브라우저에서 SketchUp처럼 3D 모델을 그리고 열어 보는 웹 편집입니다.
 
-Currently, two official plugins are available:
+## 웹 사이트
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- **앱**: https://kim0930.github.io/sketchbook/
+- **저장소**: https://github.com/kim0930/sketchbook
 
-## React Compiler
+## 주요 기능
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### 파일
+- SketchUp **SKP** 열기 · 저장 (2013–2020 형식)
+- **GLB / OBJ / STL** 내보내기
+- 예제 모델, 시작 시 기본 모델, 내장 **라이브러리**(가구·사람 등)
+- 수정 중 페이지를 닫을 때 확인
 
-## Expanding the Oxlint configuration
+### 그리기 · 편집
+- **선 · 사각형 · 원 · 호 · 오프셋 · 밀기/끌기 · 지우개**
+- **측정** 치수 저장, **페인트** 재질
+- **이동 · 회전 · 배율**, 그룹, 복사·배열
+- 끝점·중간점·중심·선 위 **스냅**, 모눈 스냅
+- mm / cm / m / in / ft 단위
+- **단면**을 켜고 그 면에 그리기
 
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
+### 선택 · 탐색
+- 단일·다중 선택 (Shift, 드래그 영역)
+- **탐색**: 회전·이동만, 선택 없음
+- **걷기**: 사람 시점 (세로 시야 60°), WASD·방향키, 벽 통과
 
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+### 평면도
+- 실시간 평면도, 확대·축소·이동, 크기 조절
+- 현재 위치 표시, 클릭·드래그로 시점 이동
+- 걷기 모드에서 도구 패널 **접기/펼치기**
+
+### 경로 · 동영상
+- 평면도에 **점 찍기**로 경로 설정
+- **따라가기**: 경로를 자동으로 걸으며, 화면을 끌어 **시선 자유 회전**
+- **동영상**: 걷기 장면을 **MP4**로 저장
+
+### 화면 · 기기
+- 화면 맞춤, 등각·위·앞·오른쪽 뷰
+- 스마트폰 레이아웃 (상·하단 한 줄, 작은 평면도)
+- 클릭·드래그 시 글씨·화면이 선택되지 않음 (입력칸은 편집 가능)
+
+## 로컬 실행
+
+```bash
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+개발 서버는 `http://127.0.0.1:5173/sketchbook/` 에서 열립니다.
+
+```bash
+npm run build
+npm run preview
+```
+
+## 기술
+
+React, TypeScript, Vite, Three.js (`@react-three/fiber`), openskp, mediabunny
